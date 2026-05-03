@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../models/song.dart';
+import '../services/music_service.dart';
 
 class PlayerPage extends StatefulWidget {
   const PlayerPage({super.key});
@@ -162,14 +163,14 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   int _currentLyricIndex() {
-    final lyrics = musicService.getLyrics(
+    final lyrics = musicService.getLyricLines(
       _currentSong.title,
       _currentSong.artist,
     );
     if (lyrics.isEmpty) return 0;
     int idx = 0;
     for (int i = 0; i < lyrics.length; i++) {
-      if (_currentPosition >= lyrics[i].key) idx = i;
+      if (_currentPosition >= lyrics[i].time) idx = i;
     }
     return idx;
   }
@@ -188,7 +189,7 @@ class _PlayerPageState extends State<PlayerPage>
     _lastLyricIndex = currentIndex;
     if (!_lyricsScrollController.hasClients) return;
 
-    final lyrics = musicService.getLyrics(
+    final lyrics = musicService.getLyricLines(
       _currentSong.title,
       _currentSong.artist,
     );
@@ -217,11 +218,11 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   void _onLyricTap(int index) {
-    final lyrics = musicService.getLyrics(
+    final lyrics = musicService.getLyricLines(
       _currentSong.title,
       _currentSong.artist,
     );
-    if (index < lyrics.length) _seekTo(lyrics[index].key);
+    if (index < lyrics.length) _seekTo(lyrics[index].time);
   }
 
   void _showPlaylistSheet() {
@@ -560,7 +561,7 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Widget _buildLyricsView(ColorScheme colorScheme) {
-    final lyrics = musicService.getLyrics(
+    final lyrics = musicService.getLyricLines(
       _currentSong.title,
       _currentSong.artist,
     );
@@ -570,7 +571,7 @@ class _PlayerPageState extends State<PlayerPage>
     if (lyrics.length <= 1) {
       return Center(
         child: Text(
-          lyrics.isEmpty ? '暂无歌词' : lyrics.first.value,
+          lyrics.isEmpty ? '暂无歌词' : lyrics.first.text,
           style: TextStyle(
             fontSize: 18,
             color: colorScheme.onSurface.withOpacity(0.5),
@@ -609,25 +610,79 @@ class _PlayerPageState extends State<PlayerPage>
             child: Padding(
               padding: const EdgeInsets.symmetric(vertical: 8),
               child: AnimatedDefaultTextStyle(
-                duration: const Duration(milliseconds: 200),
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeOutCubic,
                 style: TextStyle(
-                  fontSize: isCurrent ? 22 : 16,
-                  fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                  fontSize: isCurrent ? 18 : 15,
+                  fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
                   color: isCurrent
                       ? colorScheme.onSurface
                       : colorScheme.onSurface.withOpacity(0.35),
-                  height: 1.6,
+                  height: 1.7,
                 ),
-                child: Text(
-                  lyrics[index].value.isEmpty ? '...' : lyrics[index].value,
-                  textAlign: TextAlign.center,
-                ),
+                child: _buildLyricLine(lyrics[index], isCurrent, colorScheme),
               ),
             ),
           );
         },
       ),
     );
+  }
+
+  Widget _buildLyricLine(
+    LyricLine line,
+    bool isCurrent,
+    ColorScheme colorScheme,
+  ) {
+    final text = line.text.isEmpty ? '...' : line.text;
+    if (!line.hasWordTiming || !isCurrent) {
+      return Text(text, textAlign: TextAlign.center, softWrap: true);
+    }
+
+    final baseStyle = DefaultTextStyle.of(context).style;
+    return RichText(
+      textAlign: TextAlign.center,
+      softWrap: true,
+      text: TextSpan(
+        style: baseStyle.copyWith(
+          color: colorScheme.onSurface.withValues(alpha: 0.38),
+        ),
+        children: line.words.map((word) {
+          final reveal = _lyricWordReveal(word);
+          return TextSpan(
+            text: word.text,
+            style: TextStyle(
+              color: colorScheme.onSurface.withValues(
+                alpha: 0.34 + 0.66 * reveal,
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  double _lyricWordReveal(LyricWord word) {
+    if (word.text.trim().isEmpty) return 1;
+    final currentMs = _currentPosition.inMilliseconds;
+    final beginMs = word.begin.inMilliseconds;
+    final endMs = max(word.end.inMilliseconds, beginMs + 1);
+    if (currentMs >= endMs) return 1;
+
+    const preheatMs = 180;
+    if (currentMs < beginMs) {
+      final warmup = ((currentMs - (beginMs - preheatMs)) / preheatMs).clamp(
+        0.0,
+        1.0,
+      );
+      return 0.18 * Curves.easeOutCubic.transform(warmup);
+    }
+
+    final progress = ((currentMs - beginMs) / (endMs - beginMs)).clamp(
+      0.0,
+      1.0,
+    );
+    return 0.18 + 0.82 * Curves.easeInOutCubic.transform(progress);
   }
 
   Widget _buildProgressBar(double progress, ColorScheme colorScheme) {

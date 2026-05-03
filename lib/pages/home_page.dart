@@ -94,14 +94,41 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Future<void> _openSongSearch() async {
+    final songs = _songs;
+    if (songs.isEmpty) return;
+    final selectedIndex = await showSearch<int?>(
+      context: context,
+      delegate: SongSearchDelegate(
+        songs: songs,
+        currentIndex: musicService.currentSongIndex,
+        isPlaying: musicService.isPlaying,
+      ),
+    );
+    if (selectedIndex == null) return;
+    try {
+      await musicService.playSongAt(selectedIndex);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(e.toString())));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('音乐播放器'),
+        title: const Text('HenkMusic'),
         actions: [
+          IconButton(
+            onPressed: _songs.isEmpty ? null : _openSongSearch,
+            icon: const Icon(Icons.search_rounded),
+            tooltip: '搜索歌曲',
+          ),
           IconButton(
             onPressed: () => Navigator.pushNamed(context, '/user'),
             icon: const Icon(Icons.person_rounded),
@@ -262,6 +289,158 @@ class _HomePageState extends State<HomePage> {
               ),
       ),
     );
+  }
+
+  String _formatDuration(Duration d) {
+    if (d == Duration.zero) return '--:--';
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+}
+
+class SongSearchDelegate extends SearchDelegate<int?> {
+  SongSearchDelegate({
+    required this.songs,
+    required this.currentIndex,
+    required this.isPlaying,
+  }) : super(searchFieldLabel: '搜索当前歌单');
+
+  final List<Song> songs;
+  final int currentIndex;
+  final bool isPlaying;
+
+  @override
+  TextStyle? get searchFieldStyle => const TextStyle(fontSize: 14);
+
+  @override
+  List<Widget>? buildActions(BuildContext context) {
+    return [
+      if (query.isNotEmpty)
+        IconButton(
+          onPressed: () => query = '',
+          icon: const Icon(Icons.clear_rounded),
+          tooltip: '清除',
+        ),
+    ];
+  }
+
+  @override
+  Widget? buildLeading(BuildContext context) {
+    return IconButton(
+      onPressed: () => close(context, null),
+      icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
+      tooltip: '返回',
+    );
+  }
+
+  @override
+  Widget buildResults(BuildContext context) {
+    return _buildSearchList(context);
+  }
+
+  @override
+  Widget buildSuggestions(BuildContext context) {
+    return _buildSearchList(context);
+  }
+
+  Widget _buildSearchList(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final results = _filteredSongs();
+    if (results.isEmpty) {
+      return Center(
+        child: Text(
+          query.trim().isEmpty ? '输入歌名或歌手搜索' : '没有找到匹配歌曲',
+          style: TextStyle(
+            color: colorScheme.onSurface.withValues(alpha: 0.55),
+          ),
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      itemCount: results.length,
+      itemBuilder: (context, index) {
+        final entry = results[index];
+        final songIndex = entry.key;
+        final song = entry.value;
+        final isCurrent = songIndex == currentIndex;
+        return ListTile(
+          onTap: () => close(context, songIndex),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 2,
+          ),
+          leading: Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: isCurrent
+                  ? colorScheme.primaryContainer
+                  : colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Center(
+              child: isCurrent && isPlaying
+                  ? Icon(
+                      Icons.equalizer_rounded,
+                      color: colorScheme.primary,
+                      size: 22,
+                    )
+                  : Text(
+                      '${songIndex + 1}',
+                      style: TextStyle(
+                        color: isCurrent
+                            ? colorScheme.primary
+                            : colorScheme.onSurface.withValues(alpha: 0.5),
+                        fontWeight: FontWeight.bold,
+                        fontSize: 14,
+                      ),
+                    ),
+            ),
+          ),
+          title: Text(
+            song.title,
+            style: TextStyle(
+              color: isCurrent ? colorScheme.primary : colorScheme.onSurface,
+              fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w500,
+              fontSize: 14,
+            ),
+          ),
+          subtitle: Text(
+            song.artist,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: colorScheme.onSurface.withValues(alpha: 0.5),
+              fontSize: 11,
+            ),
+          ),
+          trailing: Text(
+            _formatDuration(song.duration),
+            style: TextStyle(
+              color: colorScheme.onSurface.withValues(alpha: 0.4),
+              fontSize: 11,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  List<MapEntry<int, Song>> _filteredSongs() {
+    final keyword = query.trim().toLowerCase();
+    final indexedSongs = songs.indexed.map(
+      (entry) => MapEntry(entry.$1, entry.$2),
+    );
+    if (keyword.isEmpty) return indexedSongs.toList();
+    return indexedSongs.where((entry) {
+      final song = entry.value;
+      return song.title.toLowerCase().contains(keyword) ||
+          song.artist.toLowerCase().contains(keyword) ||
+          song.album.toLowerCase().contains(keyword);
+    }).toList();
   }
 
   String _formatDuration(Duration d) {

@@ -8,6 +8,7 @@ import 'package:flutter/widgets.dart';
 import 'package:just_audio/just_audio.dart' as ja;
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:xml/xml.dart';
 import '../models/song.dart';
 import 'download_notification_service.dart';
 import 'kugou_api_service.dart';
@@ -56,7 +57,71 @@ class KugouDownloadProgress {
   }
 }
 
+class LyricWord {
+  final String text;
+  final Duration begin;
+  final Duration end;
+
+  const LyricWord({required this.text, required this.begin, required this.end});
+
+  Map<String, dynamic> toJson() {
+    return {
+      'text': text,
+      'beginMs': begin.inMilliseconds,
+      'endMs': end.inMilliseconds,
+    };
+  }
+
+  factory LyricWord.fromJson(Map<String, dynamic> json) {
+    return LyricWord(
+      text: json['text'] as String? ?? '',
+      begin: Duration(milliseconds: json['beginMs'] as int? ?? 0),
+      end: Duration(milliseconds: json['endMs'] as int? ?? 0),
+    );
+  }
+}
+
+class LyricLine {
+  final Duration time;
+  final String text;
+  final List<LyricWord> words;
+
+  const LyricLine({
+    required this.time,
+    required this.text,
+    this.words = const [],
+  });
+
+  bool get hasWordTiming => words.any((word) => word.text.trim().isNotEmpty);
+
+  MapEntry<Duration, String> toEntry() => MapEntry(time, text);
+
+  Map<String, dynamic> toJson() {
+    return {
+      'timeMs': time.inMilliseconds,
+      'text': text,
+      'words': words.map((word) => word.toJson()).toList(),
+    };
+  }
+
+  factory LyricLine.fromJson(Map<String, dynamic> json) {
+    return LyricLine(
+      time: Duration(milliseconds: json['timeMs'] as int? ?? 0),
+      text: json['text'] as String? ?? '',
+      words:
+          (json['words'] as List<dynamic>?)
+              ?.whereType<Map>()
+              .map(
+                (item) => LyricWord.fromJson(Map<String, dynamic>.from(item)),
+              )
+              .toList() ??
+          const [],
+    );
+  }
+}
+
 class MusicService extends ChangeNotifier with WidgetsBindingObserver {
+  static const _ttmlMetadataNs = 'http://www.w3.org/ns/ttml#metadata';
   static const _prefRootDir = 'music_root_dir';
   static const _prefMusicSource = 'music_source';
   static const _prefCurrentSong = 'current_song_idx';
@@ -72,6 +137,8 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   static const _prefKugouUser = 'kugou_user_json';
   static const _prefKugouPlaylistName = 'kugou_playlist_name';
   static const _prefLyricsCache = 'lyrics_cache_json';
+  static const _prefTtmlLyricsCache = 'ttml_lyrics_cache_json';
+  static const _prefExperimentalTtmlLyrics = 'experimental_ttml_lyrics';
 
   final ja.AudioPlayer _audioPlayer = ja.AudioPlayer();
   final KugouApiService _kugouApi = KugouApiService();
@@ -92,6 +159,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   String? _kugouError;
   KugouDownloadProgress? _kugouDownloadProgress;
   Map<String, List<MapEntry<Duration, String>>> _lyricsCache = {};
+  Map<String, List<LyricLine>> _ttmlLyricsCache = {};
   int _scannedCount = 0;
   String? _lastError;
   int _scannedLyricsCount = 0;
@@ -103,6 +171,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   PlayMode _playMode = PlayMode.sequential;
   BoundaryAction _boundaryAction = BoundaryAction.keepPlaying;
   AutoScanInterval _autoScanInterval = AutoScanInterval.off;
+  bool _experimentalTtmlLyrics = false;
   bool _isPlaying = false;
   bool _sourceLoaded = false;
   bool _scanning = false;
@@ -144,6 +213,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   PlayMode get playMode => _playMode;
   BoundaryAction get boundaryAction => _boundaryAction;
   AutoScanInterval get autoScanInterval => _autoScanInterval;
+  bool get experimentalTtmlLyrics => _experimentalTtmlLyrics;
   bool get isPlaying => _isPlaying;
 
   List<Song> get activeSongs {
@@ -188,6 +258,8 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     _autoScanInterval =
         AutoScanInterval.values[(prefs.getInt(_prefAutoScanInterval) ?? 0)
             .clamp(0, AutoScanInterval.values.length - 1)];
+    _experimentalTtmlLyrics =
+        prefs.getBool(_prefExperimentalTtmlLyrics) ?? false;
     final lastScanMs = prefs.getInt(_prefLastScanAt);
     _lastScanAt = lastScanMs == null
         ? null
@@ -223,7 +295,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     _positionSub = _audioPlayer.positionStream.listen((position) {
       _currentPosition = position;
       final now = DateTime.now();
-      if (now.difference(_lastPositionNotify).inMilliseconds >= 500) {
+      if (now.difference(_lastPositionNotify).inMilliseconds >= 80) {
         _lastPositionNotify = now;
         _publishSystemState();
         notifyListeners();
@@ -400,6 +472,16 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
       } catch (e) {
         failed++;
         debugPrint('[MusicService] Failed to download ${song.title}: $e');
+        completed++;
+        _kugouDownloadProgress = _kugouDownloadProgress?.copyWith(
+          completed: completed,
+          skipped: skipped,
+          failed: failed,
+          current: '已跳过：${song.title}',
+        );
+        await _notifyDownloadProgress();
+        notifyListeners();
+        continue;
       }
       completed++;
       _kugouDownloadProgress = _kugouDownloadProgress?.copyWith(
@@ -429,13 +511,17 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   Future<void> _notifyDownloadProgress() async {
     final progress = _kugouDownloadProgress;
     if (progress == null) return;
-    await _downloadNotifications.showProgress(
-      title: progress.running ? '正在下载歌单' : '歌单下载完成',
-      body:
-          '${progress.title} ${progress.completed}/${progress.total} ${progress.current}',
-      completed: progress.completed,
-      total: progress.total,
-    );
+    try {
+      await _downloadNotifications.showProgress(
+        title: progress.running ? '正在下载歌单' : '歌单下载完成',
+        body:
+            '${progress.title} ${progress.completed}/${progress.total} ${progress.current}',
+        completed: progress.completed,
+        total: progress.total,
+      );
+    } catch (e) {
+      debugPrint('[MusicService] Failed to update download notification: $e');
+    }
   }
 
   Future<({bool skipped})> _downloadKugouSongAssets(Song song) async {
@@ -563,9 +649,11 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     await prefs.remove(_prefRootDir);
     await prefs.remove(_prefSongLibrary);
     await prefs.remove(_prefLyricsCache);
+    await prefs.remove(_prefTtmlLyricsCache);
     await prefs.remove(_prefLastScanAt);
     _songs = [];
     _lyricsCache = {};
+    _ttmlLyricsCache = {};
     _scannedCount = 0;
     _scannedLyricsCount = 0;
     _failedLyricsCount = 0;
@@ -621,6 +709,24 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         _scannedLyricsCount = _lyricsCache.length;
       } catch (e) {
         debugPrint('[MusicService] Failed to restore lyrics cache: $e');
+      }
+    }
+
+    final ttmlLyricsJson = prefs.getString(_prefTtmlLyricsCache);
+    if (ttmlLyricsJson != null && ttmlLyricsJson.isNotEmpty) {
+      try {
+        final decoded = jsonDecode(ttmlLyricsJson) as Map<String, dynamic>;
+        _ttmlLyricsCache = decoded.map((key, value) {
+          final lines = (value as List<dynamic>)
+              .whereType<Map>()
+              .map(
+                (item) => LyricLine.fromJson(Map<String, dynamic>.from(item)),
+              )
+              .toList();
+          return MapEntry(key, lines);
+        });
+      } catch (e) {
+        debugPrint('[MusicService] Failed to restore TTML lyrics cache: $e');
       }
     }
   }
@@ -680,6 +786,10 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
       );
     });
     await prefs.setString(_prefLyricsCache, jsonEncode(lyricsJson));
+    final ttmlLyricsJson = _ttmlLyricsCache.map((key, value) {
+      return MapEntry(key, value.map((line) => line.toJson()).toList());
+    });
+    await prefs.setString(_prefTtmlLyricsCache, jsonEncode(ttmlLyricsJson));
     if (_lastScanAt != null) {
       await prefs.setInt(_prefLastScanAt, _lastScanAt!.millisecondsSinceEpoch);
     }
@@ -877,6 +987,14 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
+  Future<void> setExperimentalTtmlLyrics(bool enabled) async {
+    if (_experimentalTtmlLyrics == enabled) return;
+    _experimentalTtmlLyrics = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_prefExperimentalTtmlLyrics, enabled);
+    notifyListeners();
+  }
+
   Future<void> scanFiles({bool isAutomatic = false}) async {
     if (_rootDir == null) return;
     if (_scanning) return;
@@ -893,9 +1011,11 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
       final rootPath = _rootDir!;
       final musicDir = Directory(p.join(rootPath, 'music'));
       final lyricsDir = Directory(p.join(rootPath, 'lyrics'));
+      final ttmlDir = Directory(p.join(rootPath, 'ttml'));
       final coverDir = Directory(p.join(rootPath, 'cover'));
       final scannedSongs = <Song>[];
       final scannedLyrics = <String, List<MapEntry<Duration, String>>>{};
+      final scannedTtmlLyrics = <String, List<LyricLine>>{};
       var scannedLyricsCount = 0;
       var failedLyricsCount = 0;
 
@@ -964,19 +1084,37 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         _lastError = '目录不存在: ${scanDir.path}';
       }
 
+      if (_experimentalTtmlLyrics && await ttmlDir.exists()) {
+        final result = await _scanTtmlLyricsDir(
+          ttmlDir,
+          scannedLyrics,
+          scannedTtmlLyrics,
+        );
+        scannedLyricsCount += result.success;
+        failedLyricsCount += result.failed;
+      }
       if (await lyricsDir.exists()) {
-        final result = await _scanLyricsDir(lyricsDir, scannedLyrics);
+        final result = await _scanLrcLyricsDir(
+          lyricsDir,
+          scannedLyrics,
+          preferExisting: _experimentalTtmlLyrics,
+        );
         scannedLyricsCount += result.success;
         failedLyricsCount += result.failed;
       }
       if (await Directory(rootPath).exists()) {
-        final result = await _scanLyricsDir(Directory(rootPath), scannedLyrics);
+        final result = await _scanLrcLyricsDir(
+          Directory(rootPath),
+          scannedLyrics,
+          preferExisting: _experimentalTtmlLyrics,
+        );
         scannedLyricsCount += result.success;
         failedLyricsCount += result.failed;
       }
 
       _songs = scannedSongs;
       _lyricsCache = scannedLyrics;
+      _ttmlLyricsCache = scannedTtmlLyrics;
       _sourceLoaded = false;
       _scannedLyricsCount = scannedLyricsCount;
       _failedLyricsCount = failedLyricsCount;
@@ -984,7 +1122,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
       _lastScanAt = DateTime.now();
       _clampCurrentIndex();
       debugPrint(
-        '[MusicService] Scanned $_scannedCount songs, ${_lyricsCache.length} lrc files',
+        '[MusicService] Scanned $_scannedCount songs, ${_lyricsCache.length} lyric files',
       );
       await _persistLibrary();
       _publishSystemQueue();
@@ -1001,10 +1139,11 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     notifyListeners();
   }
 
-  Future<({int success, int failed})> _scanLyricsDir(
+  Future<({int success, int failed})> _scanLrcLyricsDir(
     Directory dir,
-    Map<String, List<MapEntry<Duration, String>>> target,
-  ) async {
+    Map<String, List<MapEntry<Duration, String>>> target, {
+    required bool preferExisting,
+  }) async {
     var success = 0;
     var failed = 0;
     for (final entity in dir.listSync()) {
@@ -1013,11 +1152,38 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
       final lrcName = p.basenameWithoutExtension(entity.path).trim();
       try {
         final content = await _readLyricFile(entity);
-        target[lrcName] = parseLrc(content);
+        if (!preferExisting || !target.containsKey(lrcName)) {
+          target[lrcName] = parseLrc(content);
+        }
         success++;
       } catch (e) {
         failed++;
         debugPrint('[MusicService] Failed to read lrc: ${entity.path} -> $e');
+      }
+    }
+    return (success: success, failed: failed);
+  }
+
+  Future<({int success, int failed})> _scanTtmlLyricsDir(
+    Directory dir,
+    Map<String, List<MapEntry<Duration, String>>> target,
+    Map<String, List<LyricLine>> richTarget,
+  ) async {
+    var success = 0;
+    var failed = 0;
+    for (final entity in dir.listSync()) {
+      if (entity is! File) continue;
+      if (p.extension(entity.path).toLowerCase() != '.ttml') continue;
+      final ttmlName = p.basenameWithoutExtension(entity.path).trim();
+      try {
+        final content = await _readLyricFile(entity);
+        final lines = parseTtmlLines(content);
+        richTarget[ttmlName] = lines;
+        target[ttmlName] = lines.map((line) => line.toEntry()).toList();
+        success++;
+      } catch (e) {
+        failed++;
+        debugPrint('[MusicService] Failed to read ttml: ${entity.path} -> $e');
       }
     }
     return (success: success, failed: failed);
@@ -1089,6 +1255,34 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         _lyricsCache['$artist-$songTitle'] ??
         _lyricsCache[songTitle] ??
         [const MapEntry(Duration.zero, '暂无歌词')];
+  }
+
+  List<LyricLine> getLyricLines(String songTitle, String artist) {
+    final song = currentSong;
+    if (song.source == MusicSource.kugou &&
+        song.title == songTitle &&
+        song.artist == artist) {
+      return getLyrics(
+        songTitle,
+        artist,
+      ).map((line) => LyricLine(time: line.key, text: line.value)).toList();
+    }
+
+    final fullName = artist.isNotEmpty && artist != '未知歌手'
+        ? '$songTitle-$artist'
+        : songTitle;
+    if (_experimentalTtmlLyrics) {
+      final ttmlLines =
+          _ttmlLyricsCache[fullName] ??
+          _ttmlLyricsCache['$artist-$songTitle'] ??
+          _ttmlLyricsCache[songTitle];
+      if (ttmlLines != null && ttmlLines.isNotEmpty) return ttmlLines;
+    }
+
+    return getLyrics(
+      songTitle,
+      artist,
+    ).map((line) => LyricLine(time: line.key, text: line.value)).toList();
   }
 
   String _lyricsKeyForSong(Song song) {
@@ -1333,6 +1527,141 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
 
     result.sort((a, b) => a.key.compareTo(b.key));
     return result;
+  }
+
+  static List<MapEntry<Duration, String>> parseTtml(String content) {
+    return parseTtmlLines(content).map((line) => line.toEntry()).toList();
+  }
+
+  static List<LyricLine> parseTtmlLines(String content) {
+    final lines = <LyricLine>[];
+    final document = XmlDocument.parse(content);
+    final paragraphs = document.descendants.whereType<XmlElement>().where(
+      (element) => element.name.local == 'p',
+    );
+
+    for (final paragraph in paragraphs) {
+      final begin = _parseTtmlTime(paragraph.getAttribute('begin'));
+      final dur = _parseTtmlTime(paragraph.getAttribute('dur'));
+      final end = _parseTtmlTime(paragraph.getAttribute('end'));
+      final start = begin ?? (end != null && dur != null ? end - dur : null);
+      if (start == null || start < Duration.zero) continue;
+
+      final parsedLine = _parseTtmlParagraph(paragraph, start);
+      lines.add(parsedLine);
+    }
+
+    lines.sort((a, b) => a.time.compareTo(b.time));
+    return lines;
+  }
+
+  static LyricLine _parseTtmlParagraph(XmlElement paragraph, Duration start) {
+    final lead = <LyricWord>[];
+    final background = <LyricWord>[];
+
+    for (final node in paragraph.children) {
+      if (node is XmlText) {
+        _appendTtmlTextNode(lead, node.value, start);
+      } else if (node is XmlElement) {
+        final role = node.getAttribute('role', namespace: _ttmlMetadataNs);
+        if (role == 'x-bg') {
+          _appendTtmlElementWords(background, node, start);
+        } else {
+          _appendTtmlElementWords(lead, node, start);
+        }
+      }
+    }
+
+    final words = [
+      ...lead,
+      if (lead.isNotEmpty && background.isNotEmpty)
+        LyricWord(text: '\n', begin: start, end: start),
+      ...background,
+    ];
+    final text = _normalizeTtmlText(words.map((word) => word.text).join());
+    return LyricLine(time: start, text: text, words: words);
+  }
+
+  static void _appendTtmlElementWords(
+    List<LyricWord> target,
+    XmlElement element,
+    Duration fallbackTime,
+  ) {
+    final begin = _parseTtmlTime(element.getAttribute('begin')) ?? fallbackTime;
+    final end = _parseTtmlTime(element.getAttribute('end')) ?? begin;
+
+    if (element.children.whereType<XmlElement>().isEmpty) {
+      final text = _normalizeInlineTtmlText(element.innerText);
+      if (text.isNotEmpty) {
+        target.add(LyricWord(text: text, begin: begin, end: end));
+      }
+      return;
+    }
+
+    for (final child in element.children) {
+      if (child is XmlText) {
+        _appendTtmlTextNode(target, child.value, begin);
+      } else if (child is XmlElement) {
+        _appendTtmlElementWords(target, child, begin);
+      }
+    }
+  }
+
+  static void _appendTtmlTextNode(
+    List<LyricWord> target,
+    String text,
+    Duration time,
+  ) {
+    final normalized = _normalizeInlineTtmlText(text);
+    if (normalized.isEmpty) return;
+    target.add(LyricWord(text: normalized, begin: time, end: time));
+  }
+
+  static String _normalizeTtmlText(String text) {
+    return text
+        .split(RegExp(r'\s*\n\s*'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .join('\n');
+  }
+
+  static String _normalizeInlineTtmlText(String text) {
+    return text.replaceAll(RegExp(r'\s+'), ' ');
+  }
+
+  static Duration? _parseTtmlTime(String? value) {
+    if (value == null || value.trim().isEmpty) return null;
+    final trimmed = value.trim();
+    final clock = RegExp(
+      r'^((\d+):)?(\d{1,2}):(\d{2})(?:[.,](\d{1,3}))?$',
+    ).firstMatch(trimmed);
+    if (clock != null) {
+      final hours = int.tryParse(clock.group(2) ?? '0') ?? 0;
+      final minutes = int.tryParse(clock.group(3) ?? '0') ?? 0;
+      final seconds = int.tryParse(clock.group(4) ?? '0') ?? 0;
+      final msStr = clock.group(5) ?? '';
+      final milliseconds = msStr.isEmpty
+          ? 0
+          : int.parse(msStr.padRight(3, '0').substring(0, 3));
+      return Duration(
+        hours: hours,
+        minutes: minutes,
+        seconds: seconds,
+        milliseconds: milliseconds,
+      );
+    }
+
+    final offset = RegExp(r'^(\d+(?:\.\d+)?)(h|m|s|ms)$').firstMatch(trimmed);
+    if (offset == null) return null;
+    final amount = double.tryParse(offset.group(1) ?? '');
+    if (amount == null) return null;
+    return switch (offset.group(2)) {
+      'h' => Duration(milliseconds: (amount * 3600000).round()),
+      'm' => Duration(milliseconds: (amount * 60000).round()),
+      's' => Duration(milliseconds: (amount * 1000).round()),
+      'ms' => Duration(milliseconds: amount.round()),
+      _ => null,
+    };
   }
 
   @override

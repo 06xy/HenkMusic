@@ -13,7 +13,7 @@
     <application
         android:usesCleartextTraffic="true"
         android:requestLegacyExternalStorage="true"
-        android:label="music_player"
+        android:label="HenkMusic"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         tools:ignore="Instantiatable">

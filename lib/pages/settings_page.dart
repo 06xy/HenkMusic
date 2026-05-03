@@ -230,6 +230,10 @@ class _SettingsPageState extends State<SettingsPage> {
               const Divider(height: 1),
               _buildManualScanTile(colorScheme),
             ], colorScheme),
+            const SizedBox(height: 18),
+            _buildSection('实验性功能', [
+              _buildTtmlLyricsTile(colorScheme),
+            ], colorScheme),
           ],
           const SizedBox(height: 18),
           _buildSection('播放设置', [_buildBoundaryTile(colorScheme)], colorScheme),
@@ -368,6 +372,40 @@ class _SettingsPageState extends State<SettingsPage> {
     );
   }
 
+  Widget _buildTtmlLyricsTile(ColorScheme colorScheme) {
+    return SwitchListTile(
+      value: musicService.experimentalTtmlLyrics,
+      onChanged: (enabled) async {
+        await musicService.setExperimentalTtmlLyrics(enabled);
+        if (!mounted) return;
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              enabled
+                  ? '已开启 TTML 歌词，重新扫描后优先读取 ttml/ 文件夹'
+                  : '已关闭 TTML 歌词，重新扫描后使用 lyrics/ 的 LRC 歌词',
+            ),
+          ),
+        );
+      },
+      secondary: Icon(Icons.subtitles_rounded, color: colorScheme.primary),
+      title: const Text(
+        'TTML 歌词',
+        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(
+        '优先读取 ttml/ 中的歌名-作者.ttml，没有时回退到 lyrics/ 的 LRC',
+        style: TextStyle(
+          color: colorScheme.onSurface.withValues(alpha: 0.5),
+          fontSize: 12,
+        ),
+      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
   Widget _buildPermissionTile(ColorScheme colorScheme) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -430,7 +468,8 @@ class _SettingsPageState extends State<SettingsPage> {
           Text(
             '选择根目录后不会自动扫描，可在扫描设置中手动更新。目录结构：\n'
             '  music/   音频文件（歌名-作者.mp3）\n'
-            '  lyrics/  歌词文件（歌名-作者.lrc）\n'
+            '  ttml/    TTML 歌词（歌名-作者.ttml）\n'
+            '  lyrics/  LRC 歌词（歌名-作者.lrc）\n'
             '  cover/   封面图片（歌名-作者.png）',
             style: TextStyle(
               color: colorScheme.onSurface.withOpacity(0.5),
@@ -471,48 +510,29 @@ class _SettingsPageState extends State<SettingsPage> {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  Row(
+                  Wrap(
+                    spacing: 16,
+                    runSpacing: 6,
                     children: [
-                      Icon(
+                      _buildDirectoryBadge(
                         Icons.music_note_rounded,
-                        size: 16,
-                        color: colorScheme.primary,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
                         'music/',
-                        style: TextStyle(
-                          color: colorScheme.onSurface.withOpacity(0.7),
-                          fontSize: 12,
-                        ),
+                        colorScheme,
                       ),
-                      const SizedBox(width: 16),
-                      Icon(
+                      _buildDirectoryBadge(
+                        Icons.subtitles_rounded,
+                        'ttml/',
+                        colorScheme,
+                      ),
+                      _buildDirectoryBadge(
                         Icons.lyrics_rounded,
-                        size: 16,
-                        color: colorScheme.primary,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
                         'lyrics/',
-                        style: TextStyle(
-                          color: colorScheme.onSurface.withOpacity(0.7),
-                          fontSize: 12,
-                        ),
+                        colorScheme,
                       ),
-                      const SizedBox(width: 16),
-                      Icon(
+                      _buildDirectoryBadge(
                         Icons.image_rounded,
-                        size: 16,
-                        color: colorScheme.primary,
-                      ),
-                      const SizedBox(width: 4),
-                      Text(
                         'cover/',
-                        style: TextStyle(
-                          color: colorScheme.onSurface.withOpacity(0.7),
-                          fontSize: 12,
-                        ),
+                        colorScheme,
                       ),
                     ],
                   ),
@@ -542,6 +562,27 @@ class _SettingsPageState extends State<SettingsPage> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildDirectoryBadge(
+    IconData icon,
+    String label,
+    ColorScheme colorScheme,
+  ) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 16, color: colorScheme.primary),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: TextStyle(
+            color: colorScheme.onSurface.withValues(alpha: 0.7),
+            fontSize: 12,
+          ),
+        ),
+      ],
     );
   }
 
