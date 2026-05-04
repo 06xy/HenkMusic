@@ -233,6 +233,8 @@ class _SettingsPageState extends State<SettingsPage> {
             const SizedBox(height: 18),
             _buildSection('实验性功能', [
               _buildTtmlLyricsTile(colorScheme),
+              const Divider(height: 1),
+              _buildReplayGainTile(colorScheme),
             ], colorScheme),
           ],
           const SizedBox(height: 18),
@@ -396,6 +398,36 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
       subtitle: Text(
         '优先读取 ttml/ 中的歌名-作者.ttml，没有时回退到 lyrics/ 的 LRC',
+        style: TextStyle(
+          color: colorScheme.onSurface.withValues(alpha: 0.5),
+          fontSize: 12,
+        ),
+      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+      visualDensity: VisualDensity.compact,
+    );
+  }
+
+  Widget _buildReplayGainTile(ColorScheme colorScheme) {
+    return SwitchListTile(
+      value: musicService.experimentalReplayGain,
+      onChanged: (enabled) async {
+        await musicService.setExperimentalReplayGain(enabled);
+        if (!mounted) return;
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(enabled ? '已开启 ReplayGain' : '已关闭 ReplayGain'),
+          ),
+        );
+      },
+      secondary: Icon(Icons.volume_up_rounded, color: colorScheme.primary),
+      title: const Text(
+        'ReplayGain',
+        style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+      ),
+      subtitle: Text(
+        '开启后将会根据音乐数据标签自动调整不同音乐的音量',
         style: TextStyle(
           color: colorScheme.onSurface.withValues(alpha: 0.5),
           fontSize: 12,

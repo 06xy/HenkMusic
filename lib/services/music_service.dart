@@ -5,7 +5,7 @@ import 'dart:math';
 import 'package:audio_service/audio_service.dart';
 import 'package:charset/charset.dart';
 import 'package:flutter/widgets.dart';
-import 'package:just_audio/just_audio.dart' as ja;
+import 'package:media_kit/media_kit.dart' as mk;
 import 'package:path/path.dart' as p;
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:xml/xml.dart';
@@ -139,8 +139,9 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   static const _prefLyricsCache = 'lyrics_cache_json';
   static const _prefTtmlLyricsCache = 'ttml_lyrics_cache_json';
   static const _prefExperimentalTtmlLyrics = 'experimental_ttml_lyrics';
+  static const _prefExperimentalReplayGain = 'experimental_replaygain';
 
-  final ja.AudioPlayer _audioPlayer = ja.AudioPlayer();
+  late final mk.Player _audioPlayer;
   final KugouApiService _kugouApi = KugouApiService();
   final DownloadNotificationService _downloadNotifications =
       DownloadNotificationService();
@@ -172,8 +173,12 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   BoundaryAction _boundaryAction = BoundaryAction.keepPlaying;
   AutoScanInterval _autoScanInterval = AutoScanInterval.off;
   bool _experimentalTtmlLyrics = false;
+  bool _experimentalReplayGain = false;
   bool _isPlaying = false;
+  bool _buffering = false;
+  bool _completed = false;
   bool _sourceLoaded = false;
+  bool _loadingPlaybackQueue = false;
   bool _scanning = false;
   bool _loadingDurations = false;
   bool _libraryLoaded = false;
@@ -183,6 +188,8 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription? _positionSub;
   StreamSubscription? _currentIndexSub;
   StreamSubscription? _stateSub;
+  StreamSubscription? _completedSub;
+  StreamSubscription? _bufferingSub;
 
   MusicService() {
     audioHandler = MusicAudioHandler(this);
@@ -214,6 +221,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   BoundaryAction get boundaryAction => _boundaryAction;
   AutoScanInterval get autoScanInterval => _autoScanInterval;
   bool get experimentalTtmlLyrics => _experimentalTtmlLyrics;
+  bool get experimentalReplayGain => _experimentalReplayGain;
   bool get isPlaying => _isPlaying;
 
   List<Song> get activeSongs {
@@ -230,6 +238,9 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> init() async {
     WidgetsBinding.instance.addObserver(this);
+    _audioPlayer = mk.Player(
+      configuration: const mk.PlayerConfiguration(title: 'HenkMusic'),
+    );
     await _downloadNotifications.init();
     _bindPlayer();
     final prefs = await SharedPreferences.getInstance();
@@ -260,6 +271,9 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
             .clamp(0, AutoScanInterval.values.length - 1)];
     _experimentalTtmlLyrics =
         prefs.getBool(_prefExperimentalTtmlLyrics) ?? false;
+    _experimentalReplayGain =
+        prefs.getBool(_prefExperimentalReplayGain) ?? false;
+    await _applyReplayGainOption();
     final lastScanMs = prefs.getInt(_prefLastScanAt);
     _lastScanAt = lastScanMs == null
         ? null
@@ -284,15 +298,15 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _bindPlayer() {
-    _durationSub = _audioPlayer.durationStream.listen((duration) {
-      if (duration != null) {
+    _durationSub = _audioPlayer.stream.duration.listen((duration) {
+      if (duration > Duration.zero) {
         _updateCurrentSongDuration(duration);
         _publishSystemQueue();
         _publishSystemState();
         notifyListeners();
       }
     });
-    _positionSub = _audioPlayer.positionStream.listen((position) {
+    _positionSub = _audioPlayer.stream.position.listen((position) {
       _currentPosition = position;
       final now = DateTime.now();
       if (now.difference(_lastPositionNotify).inMilliseconds >= 80) {
@@ -301,20 +315,21 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         notifyListeners();
       }
     });
-    _currentIndexSub = _audioPlayer.currentIndexStream.listen((index) {
-      if (_musicSource == MusicSource.kugou) return;
-      if (index == null || index == _currentSongIndex) return;
+    _currentIndexSub = _audioPlayer.stream.playlist.listen((playlist) {
+      if (_musicSource == MusicSource.kugou ||
+          _musicSource == MusicSource.local) {
+        return;
+      }
+      if (_loadingPlaybackQueue) return;
+      final index = playlist.index;
+      if (index == _currentSongIndex) return;
       _currentSongIndex = index.clamp(0, activeSongs.length - 1);
-      _currentPosition = _audioPlayer.position;
+      _currentPosition = _audioPlayer.state.position;
       unawaited(_savePlaybackState());
       _publishSystemState();
       notifyListeners();
     });
-    _stateSub = _audioPlayer.playerStateStream.listen((state) {
-      if (state.processingState == ja.ProcessingState.completed) {
-        unawaited(next(fromUser: false));
-      }
-      final playing = state.playing;
+    _stateSub = _audioPlayer.stream.playing.listen((playing) {
       if (_isPlaying != playing) {
         _isPlaying = playing;
         _syncSaveTimer();
@@ -322,6 +337,19 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         _publishSystemState();
         notifyListeners();
       }
+    });
+    _completedSub = _audioPlayer.stream.completed.listen((completed) {
+      _completed = completed;
+      if (completed) {
+        unawaited(next(fromUser: false));
+      }
+      _publishSystemState();
+      notifyListeners();
+    });
+    _bufferingSub = _audioPlayer.stream.buffering.listen((buffering) {
+      _buffering = buffering;
+      _publishSystemState();
+      notifyListeners();
     });
   }
 
@@ -866,7 +894,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
       } else if (song.source == MusicSource.kugou) {
         await _audioPlayer.seek(_currentPosition);
       } else {
-        await _audioPlayer.seek(_currentPosition, index: _currentSongIndex);
+        await _audioPlayer.seek(_currentPosition);
       }
     } catch (e) {
       _lastError = '播放失败: $e';
@@ -992,6 +1020,15 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     _experimentalTtmlLyrics = enabled;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_prefExperimentalTtmlLyrics, enabled);
+    notifyListeners();
+  }
+
+  Future<void> setExperimentalReplayGain(bool enabled) async {
+    if (_experimentalReplayGain == enabled) return;
+    _experimentalReplayGain = enabled;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_prefExperimentalReplayGain, enabled);
+    await _applyReplayGainOption();
     notifyListeners();
   }
 
@@ -1209,14 +1246,17 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     _loadingDurations = true;
     notifyListeners();
 
-    final metadataPlayer = ja.AudioPlayer();
+    final metadataPlayer = mk.Player(
+      configuration: const mk.PlayerConfiguration(title: 'HenkMusic Metadata'),
+    );
     try {
       for (var i = 0; i < _songs.length; i++) {
         final song = _songs[i];
         if (song.filePath.isEmpty || song.duration > Duration.zero) continue;
         try {
-          final duration = await metadataPlayer.setFilePath(song.filePath);
-          if (duration != null && duration > Duration.zero) {
+          await metadataPlayer.open(mk.Media(song.filePath), play: false);
+          final duration = metadataPlayer.state.duration;
+          if (duration > Duration.zero) {
             _songs[i] = song.copyWith(duration: duration);
             _publishSystemQueue();
             _publishSystemState();
@@ -1345,68 +1385,56 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     required Duration initialPosition,
   }) async {
     final songs = activeSongs;
-    if (_musicSource == MusicSource.kugou) {
-      final song = currentSong;
+    _loadingPlaybackQueue = true;
+    try {
+      await _applyReplayGainOption();
+      if (_musicSource == MusicSource.kugou) {
+        final song = currentSong;
+        final uri = await _uriForPlayback(song);
+        if (uri == null) return;
+        await _audioPlayer.open(
+          mk.Media(
+            uri.toString(),
+            extras: {'mediaItem': _mediaItemForSong(song)},
+            start: initialPosition,
+          ),
+          play: false,
+        );
+        final loadedDuration = _audioPlayer.state.duration;
+        if (loadedDuration > Duration.zero) {
+          _updateCurrentSongDuration(loadedDuration);
+        }
+        await _applyPlaybackMode();
+        _sourceLoaded = true;
+        _publishSystemQueue();
+        _publishSystemState();
+        return;
+      }
+
+      final safeIndex = initialIndex.clamp(0, songs.length - 1);
+      final song = songs[safeIndex];
       final uri = await _uriForPlayback(song);
       if (uri == null) return;
-      final loadedDuration = await _audioPlayer.setAudioSource(
-        ja.AudioSource.uri(
-          uri,
-          tag: MediaItem(
-            id: song.hash,
-            title: song.title,
-            artist: song.artist,
-            album: song.album.isEmpty ? null : song.album,
-            duration: song.duration > Duration.zero ? song.duration : null,
-            artUri: _artUriForSong(song),
-          ),
+      await _audioPlayer.open(
+        mk.Media(
+          uri.toString(),
+          extras: {'mediaItem': _mediaItemForSong(song)},
+          start: initialPosition,
         ),
-        initialPosition: initialPosition,
+        play: false,
       );
-      if (loadedDuration != null) {
+      _currentSongIndex = safeIndex;
+      final loadedDuration = _audioPlayer.state.duration;
+      if (loadedDuration > Duration.zero) {
         _updateCurrentSongDuration(loadedDuration);
       }
       await _applyPlaybackMode();
       _sourceLoaded = true;
       _publishSystemQueue();
       _publishSystemState();
-      return;
+    } finally {
+      _loadingPlaybackQueue = false;
     }
-
-    final sources = <ja.AudioSource>[];
-    for (var i = 0; i < songs.length; i++) {
-      final song = songs[i];
-      final uri = await _uriForPlayback(song);
-      if (uri == null) continue;
-      sources.add(
-        ja.AudioSource.uri(
-          uri,
-          tag: MediaItem(
-            id: song.source == MusicSource.kugou ? song.hash : song.filePath,
-            title: song.title,
-            artist: song.artist,
-            album: song.album.isEmpty ? null : song.album,
-            duration: song.duration > Duration.zero ? song.duration : null,
-            artUri: _artUriForSong(song),
-          ),
-        ),
-      );
-    }
-    if (sources.isEmpty) return;
-
-    final safeIndex = initialIndex.clamp(0, sources.length - 1);
-    final loadedDuration = await _audioPlayer.setAudioSources(
-      sources,
-      initialIndex: safeIndex,
-      initialPosition: initialPosition,
-    );
-    if (loadedDuration != null) {
-      _updateCurrentSongDuration(loadedDuration);
-    }
-    await _applyPlaybackMode();
-    _sourceLoaded = true;
-    _publishSystemQueue();
-    _publishSystemState();
   }
 
   Future<Uri?> _uriForPlayback(Song song) async {
@@ -1424,10 +1452,22 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _applyPlaybackMode() async {
-    await _audioPlayer.setLoopMode(
-      _playMode == PlayMode.singleRepeat ? ja.LoopMode.one : ja.LoopMode.off,
+    await _audioPlayer.setPlaylistMode(
+      _playMode == PlayMode.singleRepeat
+          ? mk.PlaylistMode.single
+          : mk.PlaylistMode.none,
     );
-    await _audioPlayer.setShuffleModeEnabled(_playMode == PlayMode.shuffle);
+    await _audioPlayer.setShuffle(_playMode == PlayMode.shuffle);
+  }
+
+  Future<void> _applyReplayGainOption() async {
+    final platform = _audioPlayer.platform;
+    if (platform is mk.NativePlayer) {
+      await platform.setProperty(
+        'replaygain',
+        _experimentalReplayGain ? 'track' : 'no',
+      );
+    }
   }
 
   MediaItem _mediaItemForSong(Song song) {
@@ -1479,11 +1519,11 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         controls: controls,
         androidCompactActionIndices: const [0, 1, 2],
         systemActions: const {MediaAction.seek},
-        processingState: _mapProcessingState(_audioPlayer.processingState),
+        processingState: _mapProcessingState(),
         playing: _isPlaying,
         updatePosition: _currentPosition,
-        bufferedPosition: _audioPlayer.bufferedPosition,
-        speed: _audioPlayer.speed,
+        bufferedPosition: _audioPlayer.state.buffer,
+        speed: _audioPlayer.state.rate,
         queueIndex: hasSong
             ? _currentSongIndex.clamp(0, songs.length - 1)
             : null,
@@ -1491,14 +1531,11 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     );
   }
 
-  AudioProcessingState _mapProcessingState(ja.ProcessingState state) {
-    return switch (state) {
-      ja.ProcessingState.idle => AudioProcessingState.idle,
-      ja.ProcessingState.loading => AudioProcessingState.loading,
-      ja.ProcessingState.buffering => AudioProcessingState.buffering,
-      ja.ProcessingState.ready => AudioProcessingState.ready,
-      ja.ProcessingState.completed => AudioProcessingState.completed,
-    };
+  AudioProcessingState _mapProcessingState() {
+    if (!_sourceLoaded) return AudioProcessingState.idle;
+    if (_completed) return AudioProcessingState.completed;
+    if (_buffering) return AudioProcessingState.buffering;
+    return AudioProcessingState.ready;
   }
 
   static List<MapEntry<Duration, String>> parseLrc(String content) {
@@ -1671,6 +1708,8 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     _positionSub?.cancel();
     _currentIndexSub?.cancel();
     _stateSub?.cancel();
+    _completedSub?.cancel();
+    _bufferingSub?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     unawaited(_audioPlayer.dispose());
     super.dispose();

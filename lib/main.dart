@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:audio_service/audio_service.dart';
+import 'package:media_kit/media_kit.dart';
 import 'services/music_service.dart';
 import 'pages/home_page.dart';
 import 'pages/settings_page.dart';
@@ -9,6 +10,7 @@ final musicService = MusicService();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
   await AudioService.init(
     builder: () => musicService.audioHandler,
     config: const AudioServiceConfig(
