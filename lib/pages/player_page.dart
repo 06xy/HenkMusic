@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import '../main.dart';
 import '../models/song.dart';
@@ -351,6 +352,8 @@ class _PlayerPageState extends State<PlayerPage>
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final size = MediaQuery.of(context).size;
+    final isTabletLandscape =
+        size.width > size.height && size.shortestSide >= 600;
     if (_songs.isEmpty) {
       return Scaffold(
         appBar: AppBar(
@@ -370,8 +373,12 @@ class _PlayerPageState extends State<PlayerPage>
         ? _currentPosition.inMilliseconds / duration.inMilliseconds
         : 0.0;
 
-    if (_showLyrics) {
+    if (_showLyrics || isTabletLandscape) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _autoScrollLyrics());
+    }
+
+    if (isTabletLandscape) {
+      return _buildTabletLandscapePlayer(colorScheme, size, progress);
     }
 
     return Scaffold(
@@ -415,6 +422,245 @@ class _PlayerPageState extends State<PlayerPage>
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildTabletLandscapePlayer(
+    ColorScheme colorScheme,
+    Size size,
+    double progress,
+  ) {
+    final albumSize = min(size.height * 0.5, size.width * 0.34);
+    final darkScheme = _darkPlayerScheme(colorScheme);
+    return Scaffold(
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          _buildBlurredCoverBackground(colorScheme),
+          _buildAlbumBackdropScrim(),
+          SafeArea(
+            child: Column(
+              children: [
+                _buildTabletTopBar(darkScheme),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(64, 0, 72, 24),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.center,
+                      children: [
+                        SizedBox(
+                          width: max(albumSize, 280),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Center(
+                                child: _buildAlbumArtwork(
+                                  albumSize,
+                                  darkScheme,
+                                  borderRadius: 22,
+                                ),
+                              ),
+                              const SizedBox(height: 28),
+                              _buildSongInfoOnDark(),
+                              const SizedBox(height: 20),
+                              _buildProgressBar(progress, darkScheme),
+                              const SizedBox(height: 16),
+                              _buildControls(darkScheme),
+                              const SizedBox(height: 4),
+                              _buildBottomActions(darkScheme),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 72),
+                        Expanded(
+                          child: _buildLyricsView(
+                            darkScheme,
+                            largeText: true,
+                            horizontalPadding: 0,
+                            textAlign: TextAlign.left,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  ColorScheme _darkPlayerScheme(ColorScheme base) {
+    return base.copyWith(
+      primary: Colors.white,
+      onPrimary: Colors.black,
+      surface: Colors.black,
+      onSurface: Colors.white,
+      outline: Colors.white70,
+      outlineVariant: Colors.white24,
+      shadow: Colors.black,
+    );
+  }
+
+  Widget _buildBlurredCoverBackground(ColorScheme colorScheme) {
+    final image = _coverImageProvider();
+    if (image == null) {
+      return Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              colorScheme.primary.withValues(alpha: 0.45),
+              colorScheme.secondaryContainer.withValues(alpha: 0.55),
+              colorScheme.surface,
+            ],
+          ),
+        ),
+      );
+    }
+
+    return ImageFiltered(
+      imageFilter: ImageFilter.blur(sigmaX: 34, sigmaY: 34),
+      child: Transform.scale(
+        scale: 1.16,
+        child: Image(
+          image: image,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => Container(color: colorScheme.surface),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAlbumBackdropScrim() {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: RadialGradient(
+          center: const Alignment(-0.55, -0.25),
+          radius: 1.2,
+          colors: [
+            Colors.white.withValues(alpha: 0.05),
+            Colors.black.withValues(alpha: 0.28),
+            Colors.black.withValues(alpha: 0.72),
+          ],
+          stops: const [0.0, 0.52, 1.0],
+        ),
+      ),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.black.withValues(alpha: 0.06),
+              Colors.black.withValues(alpha: 0.18),
+              Colors.black.withValues(alpha: 0.56),
+            ],
+            stops: const [0.0, 0.42, 1.0],
+          ),
+        ),
+      ),
+    );
+  }
+
+  ImageProvider? _coverImageProvider() {
+    if (_currentSong.coverPath.isNotEmpty) {
+      return FileImage(File(_currentSong.coverPath));
+    }
+    if (_currentSong.coverUrl.isNotEmpty) {
+      return NetworkImage(_currentSong.coverUrl);
+    }
+    return null;
+  }
+
+  Widget _buildSongInfoOnDark() {
+    final albumText = _currentSong.album.isEmpty
+        ? _currentSong.artist
+        : '${_currentSong.artist}  ·  ${_currentSong.album}';
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          _currentSong.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 24,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Text(
+          albumText,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.68),
+            fontSize: 15,
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTabletTopBar(ColorScheme colorScheme) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+      child: Row(
+        children: [
+          _buildGlassIconButton(
+            icon: Icons.keyboard_arrow_down_rounded,
+            colorScheme: colorScheme,
+            iconSize: 32,
+            onPressed: () => Navigator.pop(context),
+          ),
+          const Spacer(),
+          Text(
+            '正在播放',
+            style: TextStyle(
+              color: colorScheme.onSurface.withValues(alpha: 0.68),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const Spacer(),
+          _buildGlassIconButton(
+            icon: Icons.more_horiz_rounded,
+            colorScheme: colorScheme,
+            iconSize: 24,
+            onPressed: () {},
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildGlassIconButton({
+    required IconData icon,
+    required ColorScheme colorScheme,
+    required VoidCallback onPressed,
+    double iconSize = 24,
+  }) {
+    return Container(
+      width: 44,
+      height: 44,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.white.withValues(alpha: 0.12),
+      ),
+      child: IconButton(
+        onPressed: onPressed,
+        icon: Icon(icon),
+        iconSize: iconSize,
+        color: colorScheme.onSurface.withValues(alpha: 0.86),
+        padding: EdgeInsets.zero,
       ),
     );
   }
@@ -469,9 +715,22 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Widget _buildDisc(double discSize, ColorScheme colorScheme) {
+    return AnimatedBuilder(
+      animation: _discController,
+      builder: (context, child) =>
+          Transform.rotate(angle: _discController.value * 2 * pi, child: child),
+      child: _buildAlbumArtwork(discSize, colorScheme),
+    );
+  }
+
+  Widget _buildAlbumArtwork(
+    double discSize,
+    ColorScheme colorScheme, {
+    double? borderRadius,
+  }) {
     Widget discContent;
     if (_currentSong.coverPath.isNotEmpty) {
-      discContent = ClipOval(
+      discContent = _clipArtwork(
         child: Image.file(
           File(_currentSong.coverPath),
           width: discSize,
@@ -482,9 +741,10 @@ class _PlayerPageState extends State<PlayerPage>
           errorBuilder: (_, __, ___) =>
               _buildDefaultDisc(discSize, colorScheme),
         ),
+        borderRadius: borderRadius,
       );
     } else if (_currentSong.coverUrl.isNotEmpty) {
-      discContent = ClipOval(
+      discContent = _clipArtwork(
         child: Image.network(
           _currentSong.coverUrl,
           width: discSize,
@@ -495,16 +755,33 @@ class _PlayerPageState extends State<PlayerPage>
           errorBuilder: (_, __, ___) =>
               _buildDefaultDisc(discSize, colorScheme),
         ),
+        borderRadius: borderRadius,
       );
     } else {
       discContent = _buildDefaultDisc(discSize, colorScheme);
     }
 
-    return AnimatedBuilder(
-      animation: _discController,
-      builder: (context, child) =>
-          Transform.rotate(angle: _discController.value * 2 * pi, child: child),
+    if (borderRadius == null) return discContent;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(borderRadius),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.38),
+            blurRadius: 34,
+            offset: const Offset(0, 18),
+          ),
+        ],
+      ),
       child: discContent,
+    );
+  }
+
+  Widget _clipArtwork({required Widget child, double? borderRadius}) {
+    if (borderRadius == null) return ClipOval(child: child);
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(borderRadius),
+      child: child,
     );
   }
 
@@ -560,7 +837,12 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
-  Widget _buildLyricsView(ColorScheme colorScheme) {
+  Widget _buildLyricsView(
+    ColorScheme colorScheme, {
+    bool largeText = false,
+    double horizontalPadding = 32,
+    TextAlign textAlign = TextAlign.center,
+  }) {
     final lyrics = musicService.getLyricLines(
       _currentSong.title,
       _currentSong.artist,
@@ -572,9 +854,10 @@ class _PlayerPageState extends State<PlayerPage>
       return Center(
         child: Text(
           lyrics.isEmpty ? '暂无歌词' : lyrics.first.text,
+          textAlign: textAlign,
           style: TextStyle(
-            fontSize: 18,
-            color: colorScheme.onSurface.withOpacity(0.5),
+            fontSize: largeText ? 26 : 18,
+            color: colorScheme.onSurface.withValues(alpha: 0.5),
           ),
         ),
       );
@@ -598,8 +881,8 @@ class _PlayerPageState extends State<PlayerPage>
       child: ListView.builder(
         controller: _lyricsScrollController,
         padding: EdgeInsets.symmetric(
-          vertical: max(_lyricsViewportHeight / 2 - 40, 40),
-          horizontal: 32,
+          vertical: max(_lyricsViewportHeight / 2 - (largeText ? 64 : 40), 40),
+          horizontal: horizontalPadding,
         ),
         itemCount: lyrics.length,
         itemBuilder: (context, index) {
@@ -608,19 +891,28 @@ class _PlayerPageState extends State<PlayerPage>
             key: _lyricKey(index),
             onTap: () => _onLyricTap(index),
             child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
+              padding: EdgeInsets.symmetric(vertical: largeText ? 10 : 8),
               child: AnimatedDefaultTextStyle(
                 duration: const Duration(milliseconds: 260),
                 curve: Curves.easeOutCubic,
                 style: TextStyle(
-                  fontSize: isCurrent ? 18 : 15,
-                  fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
+                  fontSize: largeText
+                      ? (isCurrent ? 40 : 30)
+                      : (isCurrent ? 18 : 15),
+                  fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w600,
                   color: isCurrent
                       ? colorScheme.onSurface
-                      : colorScheme.onSurface.withOpacity(0.35),
-                  height: 1.7,
+                      : colorScheme.onSurface.withValues(
+                          alpha: largeText ? 0.38 : 0.35,
+                        ),
+                  height: largeText ? 1.28 : 1.7,
                 ),
-                child: _buildLyricLine(lyrics[index], isCurrent, colorScheme),
+                child: _buildLyricLine(
+                  lyrics[index],
+                  isCurrent,
+                  colorScheme,
+                  textAlign: textAlign,
+                ),
               ),
             ),
           );
@@ -632,16 +924,17 @@ class _PlayerPageState extends State<PlayerPage>
   Widget _buildLyricLine(
     LyricLine line,
     bool isCurrent,
-    ColorScheme colorScheme,
-  ) {
+    ColorScheme colorScheme, {
+    TextAlign textAlign = TextAlign.center,
+  }) {
     final text = line.text.isEmpty ? '...' : line.text;
     if (!line.hasWordTiming || !isCurrent) {
-      return Text(text, textAlign: TextAlign.center, softWrap: true);
+      return Text(text, textAlign: textAlign, softWrap: true);
     }
 
     final baseStyle = DefaultTextStyle.of(context).style;
     return RichText(
-      textAlign: TextAlign.center,
+      textAlign: textAlign,
       softWrap: true,
       text: TextSpan(
         style: baseStyle.copyWith(
