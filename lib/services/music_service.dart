@@ -12,6 +12,7 @@ import 'package:xml/xml.dart';
 import '../models/song.dart';
 import 'download_notification_service.dart';
 import 'kugou_api_service.dart';
+import 'playback_source_resolver.dart';
 
 class KugouDownloadProgress {
   final String playlistId;
@@ -143,6 +144,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
 
   late final mk.Player _audioPlayer;
   final KugouApiService _kugouApi = KugouApiService();
+  late final PlaybackSourceResolver _playbackSourceResolver;
   final DownloadNotificationService _downloadNotifications =
       DownloadNotificationService();
   final _random = Random();
@@ -179,6 +181,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   bool _completed = false;
   bool _sourceLoaded = false;
   bool _loadingPlaybackQueue = false;
+  bool _switchingTrack = false;
   bool _scanning = false;
   bool _loadingDurations = false;
   bool _libraryLoaded = false;
@@ -190,9 +193,13 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   StreamSubscription? _stateSub;
   StreamSubscription? _completedSub;
   StreamSubscription? _bufferingSub;
+  Future<void> _trackChangeQueue = Future<void>.value();
 
   MusicService() {
     audioHandler = MusicAudioHandler(this);
+    _playbackSourceResolver = PlaybackSourceResolver(
+      resolveKugouUrl: _kugouApi.resolveSongUrl,
+    );
   }
 
   String? get rootDir => _rootDir;
@@ -223,6 +230,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   bool get experimentalTtmlLyrics => _experimentalTtmlLyrics;
   bool get experimentalReplayGain => _experimentalReplayGain;
   bool get isPlaying => _isPlaying;
+  bool get isSwitchingTrack => _switchingTrack;
 
   List<Song> get activeSongs {
     if (_musicSource == MusicSource.kugou) return _kugouSongs;
@@ -299,6 +307,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
 
   void _bindPlayer() {
     _durationSub = _audioPlayer.stream.duration.listen((duration) {
+      if (_loadingPlaybackQueue) return;
       if (duration > Duration.zero) {
         _updateCurrentSongDuration(duration);
         _publishSystemQueue();
@@ -339,9 +348,14 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
       }
     });
     _completedSub = _audioPlayer.stream.completed.listen((completed) {
+      final shouldAdvance =
+          completed &&
+          !_completed &&
+          !_loadingPlaybackQueue &&
+          !_switchingTrack;
       _completed = completed;
-      if (completed) {
-        unawaited(next(fromUser: false));
+      if (shouldAdvance) {
+        unawaited(_advanceAfterCompletion());
       }
       _publishSystemState();
       notifyListeners();
@@ -351,6 +365,18 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
       _publishSystemState();
       notifyListeners();
     });
+  }
+
+  Future<void> _advanceAfterCompletion() async {
+    try {
+      await next(fromUser: false);
+    } catch (e) {
+      _lastError = '自动切歌失败: $e';
+      _isPlaying = false;
+      _syncSaveTimer();
+      _publishSystemState();
+      notifyListeners();
+    }
   }
 
   Future<void> setRootDir(String path) async {
@@ -850,14 +876,64 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<PlaybackActionResult> playSongAt(int index) async {
-    if (activeSongs.isEmpty) return PlaybackActionResult.reachedBoundary;
-    _currentSongIndex = index.clamp(0, activeSongs.length - 1);
-    _currentPosition = Duration.zero;
-    _sourceLoaded = false;
+  Future<PlaybackActionResult> playSongAt(int index) {
+    if (activeSongs.isEmpty) {
+      return Future.value(PlaybackActionResult.reachedBoundary);
+    }
+
+    final completer = Completer<PlaybackActionResult>();
+    _trackChangeQueue = _trackChangeQueue.then((_) async {
+      try {
+        completer.complete(await _playSongAtInternal(index));
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    });
+    return completer.future;
+  }
+
+  Future<PlaybackActionResult> _playSongAtInternal(int index) async {
+    final songs = activeSongs;
+    if (songs.isEmpty) return PlaybackActionResult.reachedBoundary;
+
+    final targetIndex = index.clamp(0, songs.length - 1);
+    final targetSong = songs[targetIndex];
+    _switchingTrack = true;
+    _lastError = null;
     _publishSystemState();
-    await play();
-    return PlaybackActionResult.played;
+    notifyListeners();
+
+    try {
+      if (_isDemoSong(targetSong)) {
+        _currentSongIndex = targetIndex;
+        _currentPosition = Duration.zero;
+        _sourceLoaded = true;
+      } else {
+        await _loadPlaybackQueue(
+          initialIndex: targetIndex,
+          initialPosition: Duration.zero,
+        );
+        await _audioPlayer.play();
+      }
+
+      if (targetSong.source == MusicSource.kugou) {
+        unawaited(_loadKugouLyrics(targetSong));
+      }
+      _isPlaying = true;
+      _syncSaveTimer();
+      await _savePlaybackState();
+      _publishSystemState();
+      return PlaybackActionResult.played;
+    } catch (e) {
+      _lastError = '播放失败: $e';
+      _isPlaying = _sourceLoaded && _audioPlayer.state.playing;
+      _syncSaveTimer();
+      _publishSystemState();
+      rethrow;
+    } finally {
+      _switchingTrack = false;
+      notifyListeners();
+    }
   }
 
   Future<PlaybackActionResult> playSong(Song song) async {
@@ -867,6 +943,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> togglePlayPause() async {
+    await _trackChangeQueue;
     if (_isPlaying) {
       await pause();
     } else {
@@ -875,8 +952,9 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> play() async {
-    final song = currentSong;
-    if (song.source == MusicSource.local && song.filePath.isEmpty) {
+    await _trackChangeQueue;
+    var song = currentSong;
+    if (_isDemoSong(song)) {
       _isPlaying = true;
       _sourceLoaded = true;
       _syncSaveTimer();
@@ -891,22 +969,27 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
           initialIndex: _currentSongIndex,
           initialPosition: _currentPosition,
         );
-      } else if (song.source == MusicSource.kugou) {
-        await _audioPlayer.seek(_currentPosition);
       } else {
         await _audioPlayer.seek(_currentPosition);
       }
+      if (!_sourceLoaded) {
+        throw const PlaybackSourceException('歌曲音源尚未加载');
+      }
     } catch (e) {
       _lastError = '播放失败: $e';
-      _isPlaying = false;
+      _isPlaying = _sourceLoaded && _audioPlayer.state.playing;
+      _syncSaveTimer();
       _publishSystemState();
       notifyListeners();
       rethrow;
     }
     await _audioPlayer.play();
+    song = currentSong;
     if (song.source == MusicSource.kugou) {
       unawaited(_loadKugouLyrics(song));
     }
+    _completed = false;
+    _lastError = null;
     _isPlaying = true;
     _syncSaveTimer();
     await _savePlaybackState();
@@ -915,6 +998,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> pause() async {
+    await _trackChangeQueue;
     if (currentSong.filePath.isNotEmpty ||
         currentSong.source == MusicSource.kugou) {
       await _audioPlayer.pause();
@@ -927,6 +1011,7 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> seek(Duration position) async {
+    await _trackChangeQueue;
     final duration = currentSong.duration;
     final safePosition = duration > Duration.zero && position > duration
         ? duration
@@ -939,12 +1024,14 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         _sourceLoaded) {
       await _audioPlayer.seek(_currentPosition);
     }
+    _completed = false;
     await _savePlaybackState();
     _publishSystemState();
     notifyListeners();
   }
 
   Future<PlaybackActionResult> next({bool fromUser = true}) async {
+    await _trackChangeQueue;
     if (activeSongs.isEmpty) return PlaybackActionResult.reachedBoundary;
     switch (_playMode) {
       case PlayMode.singleRepeat:
@@ -952,18 +1039,31 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         await play();
         return PlaybackActionResult.restartedCurrent;
       case PlayMode.shuffle:
-        await playSongAt(_random.nextInt(activeSongs.length));
-        return PlaybackActionResult.played;
+        if (activeSongs.length == 1) {
+          await seek(Duration.zero);
+          await play();
+          return PlaybackActionResult.restartedCurrent;
+        }
+        final candidates = List<int>.generate(activeSongs.length, (i) => i)
+          ..remove(_currentSongIndex)
+          ..shuffle(_random);
+        return _playFirstAvailable(candidates, fromUser: fromUser);
       case PlayMode.sequential:
         if (_currentSongIndex >= activeSongs.length - 1) {
           return _handleBoundary(fromUser);
         }
-        await playSongAt(_currentSongIndex + 1);
-        return PlaybackActionResult.played;
+        return _playFirstAvailable(
+          List<int>.generate(
+            activeSongs.length - _currentSongIndex - 1,
+            (offset) => _currentSongIndex + offset + 1,
+          ),
+          fromUser: fromUser,
+        );
     }
   }
 
   Future<PlaybackActionResult> previous({bool fromUser = true}) async {
+    await _trackChangeQueue;
     if (activeSongs.isEmpty) return PlaybackActionResult.reachedBoundary;
     switch (_playMode) {
       case PlayMode.singleRepeat:
@@ -971,15 +1071,62 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
         await play();
         return PlaybackActionResult.restartedCurrent;
       case PlayMode.shuffle:
-        await playSongAt(_random.nextInt(activeSongs.length));
-        return PlaybackActionResult.played;
+        if (activeSongs.length == 1) {
+          await seek(Duration.zero);
+          await play();
+          return PlaybackActionResult.restartedCurrent;
+        }
+        final candidates = List<int>.generate(activeSongs.length, (i) => i)
+          ..remove(_currentSongIndex)
+          ..shuffle(_random);
+        return _playFirstAvailable(candidates, fromUser: fromUser);
       case PlayMode.sequential:
         if (_currentSongIndex <= 0) {
           return _handleBoundary(fromUser);
         }
-        await playSongAt(_currentSongIndex - 1);
-        return PlaybackActionResult.played;
+        return _playFirstAvailable(
+          List<int>.generate(
+            _currentSongIndex,
+            (offset) => _currentSongIndex - offset - 1,
+          ),
+          fromUser: fromUser,
+        );
     }
+  }
+
+  Future<PlaybackActionResult> _playFirstAvailable(
+    Iterable<int> candidates, {
+    required bool fromUser,
+  }) async {
+    Object? lastError;
+    for (final index in candidates) {
+      try {
+        return await playSongAt(index);
+      } catch (e) {
+        lastError = e;
+        debugPrint(
+          '[MusicService] Skipping unavailable song at index $index: $e',
+        );
+      }
+    }
+
+    if (lastError == null) return _handleBoundary(fromUser);
+    final message = '没有找到可播放的歌曲: $lastError';
+    _lastError = message;
+    if (!fromUser) {
+      await pause();
+      _publishSystemState();
+      notifyListeners();
+      return PlaybackActionResult.reachedBoundary;
+    }
+    throw PlaybackSourceException(message);
+  }
+
+  bool _isDemoSong(Song song) {
+    return song.source == MusicSource.local &&
+        song.filePath.isEmpty &&
+        _songs.isEmpty &&
+        _rootDir == null;
   }
 
   Future<PlaybackActionResult> _handleBoundary(bool fromUser) async {
@@ -1363,20 +1510,18 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _updateCurrentSongDuration(Duration duration) {
+    _updateSongDurationAt(_currentSongIndex, duration);
+  }
+
+  void _updateSongDurationAt(int index, Duration duration) {
     final target = _musicSource == MusicSource.kugou ? _kugouSongs : _songs;
-    if (target.isEmpty ||
-        _currentSongIndex < 0 ||
-        _currentSongIndex >= target.length) {
+    if (target.isEmpty || index < 0 || index >= target.length) {
       return;
     }
     if (_musicSource == MusicSource.kugou) {
-      _kugouSongs[_currentSongIndex] = _kugouSongs[_currentSongIndex].copyWith(
-        duration: duration,
-      );
+      _kugouSongs[index] = _kugouSongs[index].copyWith(duration: duration);
     } else {
-      _songs[_currentSongIndex] = _songs[_currentSongIndex].copyWith(
-        duration: duration,
-      );
+      _songs[index] = _songs[index].copyWith(duration: duration);
     }
   }
 
@@ -1385,51 +1530,43 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     required Duration initialPosition,
   }) async {
     final songs = activeSongs;
+    if (songs.isEmpty) {
+      throw const PlaybackSourceException('播放列表为空');
+    }
+    final source = _musicSource;
+    final safeIndex = initialIndex.clamp(0, songs.length - 1);
+    final song = songs[safeIndex];
     _loadingPlaybackQueue = true;
     try {
       await _applyReplayGainOption();
-      if (_musicSource == MusicSource.kugou) {
-        final song = currentSong;
-        final uri = await _uriForPlayback(song);
-        if (uri == null) return;
-        await _audioPlayer.open(
-          mk.Media(
-            uri.toString(),
-            extras: {'mediaItem': _mediaItemForSong(song)},
-            start: initialPosition,
-          ),
-          play: false,
-        );
-        final loadedDuration = _audioPlayer.state.duration;
-        if (loadedDuration > Duration.zero) {
-          _updateCurrentSongDuration(loadedDuration);
-        }
-        await _applyPlaybackMode();
-        _sourceLoaded = true;
-        _publishSystemQueue();
-        _publishSystemState();
-        return;
+      var uri = await _uriForPlayback(song, songIndex: safeIndex);
+      if (_musicSource != source || !identical(activeSongs, songs)) {
+        throw const PlaybackSourceException('播放列表已发生变化，请重试');
       }
 
-      final safeIndex = initialIndex.clamp(0, songs.length - 1);
-      final song = songs[safeIndex];
-      final uri = await _uriForPlayback(song);
-      if (uri == null) return;
-      await _audioPlayer.open(
-        mk.Media(
-          uri.toString(),
-          extras: {'mediaItem': _mediaItemForSong(song)},
-          start: initialPosition,
-        ),
-        play: false,
-      );
+      _sourceLoaded = false;
+      try {
+        await _openPlaybackMedia(song, uri, initialPosition);
+      } catch (_) {
+        if (song.source != MusicSource.kugou || song.playUrl.isEmpty) rethrow;
+        uri = await _uriForPlayback(
+          song,
+          songIndex: safeIndex,
+          refreshRemoteUrl: true,
+        );
+        await _openPlaybackMedia(song, uri, initialPosition);
+      }
+
       _currentSongIndex = safeIndex;
+      _currentPosition = _audioPlayer.state.position;
+      _completed = false;
       final loadedDuration = _audioPlayer.state.duration;
       if (loadedDuration > Duration.zero) {
-        _updateCurrentSongDuration(loadedDuration);
+        _updateSongDurationAt(safeIndex, loadedDuration);
       }
       await _applyPlaybackMode();
       _sourceLoaded = true;
+      _lastError = null;
       _publishSystemQueue();
       _publishSystemState();
     } finally {
@@ -1437,18 +1574,41 @@ class MusicService extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
-  Future<Uri?> _uriForPlayback(Song song) async {
+  Future<void> _openPlaybackMedia(
+    Song song,
+    Uri uri,
+    Duration initialPosition,
+  ) {
+    return _audioPlayer.open(
+      mk.Media(
+        uri.toString(),
+        extras: {'mediaItem': _mediaItemForSong(song)},
+        start: initialPosition,
+      ),
+      play: false,
+    );
+  }
+
+  Future<Uri> _uriForPlayback(
+    Song song, {
+    required int songIndex,
+    bool refreshRemoteUrl = false,
+  }) async {
+    final uri = await _playbackSourceResolver.resolve(
+      song,
+      refreshRemoteUrl: refreshRemoteUrl,
+    );
     if (song.source == MusicSource.kugou) {
-      final url = await _kugouApi.resolveSongUrl(song);
-      final index = _kugouSongs.indexOf(song);
-      if (index >= 0 && _kugouSongs[index].playUrl != url) {
-        _kugouSongs[index] = _kugouSongs[index].copyWith(playUrl: url);
+      if (songIndex >= 0 &&
+          songIndex < _kugouSongs.length &&
+          _kugouSongs[songIndex].playUrl != uri.toString()) {
+        _kugouSongs[songIndex] = _kugouSongs[songIndex].copyWith(
+          playUrl: uri.toString(),
+        );
         unawaited(_persistKugouState());
       }
-      return Uri.parse(url);
     }
-    if (song.filePath.isEmpty) return null;
-    return Uri.file(song.filePath);
+    return uri;
   }
 
   Future<void> _applyPlaybackMode() async {

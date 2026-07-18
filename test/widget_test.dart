@@ -1,5 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter/material.dart';
 import 'package:music_player/main.dart';
+import 'package:music_player/pages/player_page.dart';
 import 'package:music_player/services/music_service.dart';
 
 void main() {
@@ -54,5 +56,61 @@ void main() {
       const Duration(minutes: 1, seconds: 43, milliseconds: 805),
     );
     expect(lyrics.last.value, '原来是我');
+  });
+
+  for (final layout in <({String name, Size size, String key})>[
+    (
+      name: 'phone portrait',
+      size: const Size(390, 844),
+      key: 'player-phone-portrait',
+    ),
+    (
+      name: 'phone landscape',
+      size: const Size(844, 390),
+      key: 'player-phone-landscape',
+    ),
+    (
+      name: 'tablet portrait',
+      size: const Size(834, 1194),
+      key: 'player-tablet-portrait',
+    ),
+    (
+      name: 'tablet landscape',
+      size: const Size(1194, 834),
+      key: 'player-tablet-landscape',
+    ),
+  ]) {
+    testWidgets('PlayerPage renders the ${layout.name} layout', (
+      WidgetTester tester,
+    ) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = layout.size;
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+
+      await tester.pumpWidget(const MaterialApp(home: PlayerPage()));
+      await tester.pump();
+
+      expect(find.byKey(Key(layout.key)), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets('Phone portrait switches between artwork and lyrics', (
+    WidgetTester tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(390, 844);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+
+    await tester.pumpWidget(const MaterialApp(home: PlayerPage()));
+    expect(find.byKey(const ValueKey('portrait-artwork')), findsOneWidget);
+
+    await tester.tap(find.byIcon(Icons.lyrics_rounded));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('portrait-lyrics')), findsOneWidget);
+    expect(tester.takeException(), isNull);
   });
 }

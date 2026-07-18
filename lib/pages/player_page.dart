@@ -13,9 +13,7 @@ class PlayerPage extends StatefulWidget {
   State<PlayerPage> createState() => _PlayerPageState();
 }
 
-class _PlayerPageState extends State<PlayerPage>
-    with SingleTickerProviderStateMixin {
-  late AnimationController _discController;
+class _PlayerPageState extends State<PlayerPage> {
   final ScrollController _lyricsScrollController = ScrollController();
   final Map<int, GlobalKey> _lyricKeys = {};
 
@@ -30,32 +28,22 @@ class _PlayerPageState extends State<PlayerPage>
   Duration get _currentPosition => musicService.currentPosition;
   PlayMode get _playMode => musicService.playMode;
   bool get _isPlaying => musicService.isPlaying;
+  bool get _isSwitchingTrack => musicService.isSwitchingTrack;
 
   @override
   void initState() {
     super.initState();
     musicService.addListener(_onServiceChanged);
-    _discController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 20),
-    );
-    if (_isPlaying) _discController.repeat();
   }
 
   @override
   void dispose() {
     musicService.removeListener(_onServiceChanged);
-    _discController.dispose();
     _lyricsScrollController.dispose();
     super.dispose();
   }
 
   void _onServiceChanged() {
-    if (_isPlaying) {
-      if (!_discController.isAnimating) _discController.repeat();
-    } else {
-      _discController.stop();
-    }
     if (mounted) setState(() {});
   }
 
@@ -274,7 +262,7 @@ class _PlayerPageState extends State<PlayerPage>
                           '${songs.length}首',
                           style: TextStyle(
                             fontSize: 13,
-                            color: colorScheme.onSurface.withOpacity(0.5),
+                            color: colorScheme.onSurface.withValues(alpha: 0.5),
                           ),
                         ),
                       ],
@@ -299,8 +287,8 @@ class _PlayerPageState extends State<PlayerPage>
                               : Text(
                                   '${index + 1}',
                                   style: TextStyle(
-                                    color: colorScheme.onSurface.withOpacity(
-                                      0.4,
+                                    color: colorScheme.onSurface.withValues(
+                                      alpha: 0.4,
                                     ),
                                     fontSize: 14,
                                   ),
@@ -320,14 +308,18 @@ class _PlayerPageState extends State<PlayerPage>
                           subtitle: Text(
                             song.artist,
                             style: TextStyle(
-                              color: colorScheme.onSurface.withOpacity(0.5),
+                              color: colorScheme.onSurface.withValues(
+                                alpha: 0.5,
+                              ),
                               fontSize: 12,
                             ),
                           ),
                           trailing: Text(
                             _formatDuration(song.duration),
                             style: TextStyle(
-                              color: colorScheme.onSurface.withOpacity(0.4),
+                              color: colorScheme.onSurface.withValues(
+                                alpha: 0.4,
+                              ),
                               fontSize: 12,
                             ),
                           ),
@@ -352,8 +344,8 @@ class _PlayerPageState extends State<PlayerPage>
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final size = MediaQuery.of(context).size;
-    final isTabletLandscape =
-        size.width > size.height && size.shortestSide >= 600;
+    final isLandscape = size.width > size.height;
+    final isTablet = size.shortestSide >= 600;
     if (_songs.isEmpty) {
       return Scaffold(
         appBar: AppBar(
@@ -367,63 +359,198 @@ class _PlayerPageState extends State<PlayerPage>
       );
     }
 
-    final discSize = min(size.width * 0.65, 280.0);
     final duration = _currentSong.duration;
     final progress = duration.inMilliseconds > 0
         ? _currentPosition.inMilliseconds / duration.inMilliseconds
         : 0.0;
 
-    if (_showLyrics || isTabletLandscape) {
+    if (_showLyrics || isLandscape) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _autoScrollLyrics());
     }
 
-    if (isTabletLandscape) {
+    if (isLandscape && isTablet) {
       return _buildTabletLandscapePlayer(colorScheme, size, progress);
     }
+    if (isLandscape) {
+      return _buildPhoneLandscapePlayer(colorScheme, size, progress);
+    }
+    return _buildPortraitApplePlayer(
+      colorScheme,
+      size,
+      progress,
+      isTablet: isTablet,
+    );
+  }
 
+  Widget _buildPortraitApplePlayer(
+    ColorScheme colorScheme,
+    Size size,
+    double progress, {
+    required bool isTablet,
+  }) {
+    final darkScheme = _darkPlayerScheme(colorScheme);
+    final artworkSize = min(
+      size.width - (isTablet ? 144 : 56),
+      size.height * (isTablet ? 0.44 : 0.4),
+    );
     return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [colorScheme.primaryContainer, colorScheme.surface],
-            stops: const [0.0, 0.6],
-          ),
-        ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              _buildAppBar(context, colorScheme),
-              if (_showLyrics)
+      key: Key(isTablet ? 'player-tablet-portrait' : 'player-phone-portrait'),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          _buildBlurredCoverBackground(colorScheme),
+          _buildAlbumBackdropScrim(),
+          SafeArea(
+            child: Column(
+              children: [
+                _buildAppleTopBar(darkScheme),
                 Expanded(
-                  child: GestureDetector(
-                    onTap: () => setState(() => _showLyrics = false),
-                    child: _buildLyricsView(colorScheme),
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 320),
+                    switchInCurve: Curves.easeOutCubic,
+                    switchOutCurve: Curves.easeInCubic,
+                    child: _showLyrics
+                        ? Padding(
+                            key: const ValueKey('portrait-lyrics'),
+                            padding: EdgeInsets.symmetric(
+                              horizontal: isTablet ? 72 : 24,
+                            ),
+                            child: _buildLyricsView(
+                              darkScheme,
+                              horizontalPadding: 0,
+                              textAlign: TextAlign.left,
+                              activeFontSize: isTablet ? 38 : 30,
+                              inactiveFontSize: isTablet ? 28 : 22,
+                              lyricLineHeight: 1.32,
+                            ),
+                          )
+                        : Center(
+                            key: const ValueKey('portrait-artwork'),
+                            child: GestureDetector(
+                              onTap: _toggleLyrics,
+                              child: _buildAlbumArtwork(
+                                artworkSize,
+                                darkScheme,
+                                borderRadius: isTablet ? 24 : 18,
+                              ),
+                            ),
+                          ),
                   ),
-                )
-              else ...[
-                const Spacer(flex: 1),
-                GestureDetector(
-                  onTap: () {
-                    setState(() => _showLyrics = true);
-                    _lastLyricIndex = -1;
-                  },
-                  child: _buildDisc(discSize, colorScheme),
                 ),
-                const Spacer(flex: 1),
+                Padding(
+                  padding: EdgeInsets.symmetric(horizontal: isTablet ? 72 : 28),
+                  child: _buildSongInfoOnDark(titleSize: isTablet ? 27 : 22),
+                ),
+                SizedBox(height: isTablet ? 18 : 12),
+                _buildProgressBar(
+                  progress,
+                  darkScheme,
+                  horizontalPadding: isTablet ? 56 : 18,
+                ),
+                SizedBox(height: isTablet ? 18 : 12),
+                _buildControls(
+                  darkScheme,
+                  playButtonSize: isTablet ? 72 : 64,
+                  controlIconSize: isTablet ? 40 : 36,
+                ),
+                SizedBox(height: isTablet ? 10 : 4),
+                _buildAppleActionBar(darkScheme, showLyricsButton: true),
+                SizedBox(height: isTablet ? 18 : 8),
               ],
-              _buildProgressBar(progress, colorScheme),
-              const SizedBox(height: 20),
-              _buildControls(colorScheme),
-              const SizedBox(height: 12),
-              _buildBottomActions(colorScheme),
-              const SizedBox(height: 20),
-            ],
+            ),
           ),
-        ),
+        ],
       ),
     );
+  }
+
+  Widget _buildPhoneLandscapePlayer(
+    ColorScheme colorScheme,
+    Size size,
+    double progress,
+  ) {
+    final darkScheme = _darkPlayerScheme(colorScheme);
+    final artworkSize = min(size.height * 0.52, size.width * 0.28);
+    return Scaffold(
+      key: const Key('player-phone-landscape'),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          _buildBlurredCoverBackground(colorScheme),
+          _buildAlbumBackdropScrim(),
+          SafeArea(
+            child: Column(
+              children: [
+                _buildAppleTopBar(darkScheme, compact: true),
+                Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(28, 0, 32, 12),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: max(artworkSize, 160),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Center(
+                                child: _buildAlbumArtwork(
+                                  artworkSize,
+                                  darkScheme,
+                                  borderRadius: 16,
+                                ),
+                              ),
+                              const SizedBox(height: 12),
+                              _buildSongInfoOnDark(titleSize: 18),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 36),
+                        Expanded(
+                          child: Column(
+                            children: [
+                              Expanded(
+                                child: _buildLyricsView(
+                                  darkScheme,
+                                  horizontalPadding: 0,
+                                  textAlign: TextAlign.left,
+                                  activeFontSize: 25,
+                                  inactiveFontSize: 19,
+                                  lyricLineHeight: 1.25,
+                                ),
+                              ),
+                              _buildProgressBar(
+                                progress,
+                                darkScheme,
+                                horizontalPadding: 0,
+                                compact: true,
+                              ),
+                              _buildControls(
+                                darkScheme,
+                                playButtonSize: 50,
+                                controlIconSize: 30,
+                                horizontalPadding: 8,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _toggleLyrics() {
+    setState(() {
+      _showLyrics = !_showLyrics;
+      _lastLyricIndex = -1;
+    });
   }
 
   Widget _buildTabletLandscapePlayer(
@@ -434,6 +561,7 @@ class _PlayerPageState extends State<PlayerPage>
     final albumSize = min(size.height * 0.5, size.width * 0.34);
     final darkScheme = _darkPlayerScheme(colorScheme);
     return Scaffold(
+      key: const Key('player-tablet-landscape'),
       body: Stack(
         fit: StackFit.expand,
         children: [
@@ -442,7 +570,7 @@ class _PlayerPageState extends State<PlayerPage>
           SafeArea(
             child: Column(
               children: [
-                _buildTabletTopBar(darkScheme),
+                _buildAppleTopBar(darkScheme),
                 Expanded(
                   child: Padding(
                     padding: const EdgeInsets.fromLTRB(64, 0, 72, 24),
@@ -469,7 +597,10 @@ class _PlayerPageState extends State<PlayerPage>
                               const SizedBox(height: 16),
                               _buildControls(darkScheme),
                               const SizedBox(height: 4),
-                              _buildBottomActions(darkScheme),
+                              _buildAppleActionBar(
+                                darkScheme,
+                                showLyricsButton: false,
+                              ),
                             ],
                           ),
                         ),
@@ -578,7 +709,7 @@ class _PlayerPageState extends State<PlayerPage>
     return null;
   }
 
-  Widget _buildSongInfoOnDark() {
+  Widget _buildSongInfoOnDark({double titleSize = 24}) {
     final albumText = _currentSong.album.isEmpty
         ? _currentSong.artist
         : '${_currentSong.artist}  ·  ${_currentSong.album}';
@@ -591,9 +722,8 @@ class _PlayerPageState extends State<PlayerPage>
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
             color: Colors.white,
-            fontSize: 24,
             fontWeight: FontWeight.w700,
-          ),
+          ).copyWith(fontSize: titleSize),
         ),
         const SizedBox(height: 6),
         Text(
@@ -610,15 +740,17 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
-  Widget _buildTabletTopBar(ColorScheme colorScheme) {
+  Widget _buildAppleTopBar(ColorScheme colorScheme, {bool compact = false}) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 8, 18, 0),
+      padding: EdgeInsets.fromLTRB(18, compact ? 2 : 8, 18, 0),
       child: Row(
         children: [
           _buildGlassIconButton(
             icon: Icons.keyboard_arrow_down_rounded,
             colorScheme: colorScheme,
-            iconSize: 32,
+            iconSize: compact ? 28 : 32,
+            size: compact ? 38 : 44,
+            tooltip: '收起播放页',
             onPressed: () => Navigator.pop(context),
           ),
           const Spacer(),
@@ -626,7 +758,7 @@ class _PlayerPageState extends State<PlayerPage>
             '正在播放',
             style: TextStyle(
               color: colorScheme.onSurface.withValues(alpha: 0.68),
-              fontSize: 13,
+              fontSize: compact ? 12 : 13,
               fontWeight: FontWeight.w600,
             ),
           ),
@@ -634,8 +766,10 @@ class _PlayerPageState extends State<PlayerPage>
           _buildGlassIconButton(
             icon: Icons.more_horiz_rounded,
             colorScheme: colorScheme,
-            iconSize: 24,
-            onPressed: () {},
+            iconSize: compact ? 22 : 24,
+            size: compact ? 38 : 44,
+            tooltip: '播放列表',
+            onPressed: _showPlaylistSheet,
           ),
         ],
       ),
@@ -647,10 +781,12 @@ class _PlayerPageState extends State<PlayerPage>
     required ColorScheme colorScheme,
     required VoidCallback onPressed,
     double iconSize = 24,
+    double size = 44,
+    String? tooltip,
   }) {
     return Container(
-      width: 44,
-      height: 44,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: Colors.white.withValues(alpha: 0.12),
@@ -661,65 +797,8 @@ class _PlayerPageState extends State<PlayerPage>
         iconSize: iconSize,
         color: colorScheme.onSurface.withValues(alpha: 0.86),
         padding: EdgeInsets.zero,
+        tooltip: tooltip,
       ),
-    );
-  }
-
-  Widget _buildAppBar(BuildContext context, ColorScheme colorScheme) {
-    final albumText = _currentSong.album.isEmpty
-        ? _currentSong.artist
-        : '${_currentSong.artist}  ·  ${_currentSong.album}';
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      child: Row(
-        children: [
-          IconButton(
-            onPressed: () => Navigator.pop(context),
-            icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32),
-            color: colorScheme.onSurface,
-          ),
-          Expanded(
-            child: Column(
-              children: [
-                Text(
-                  _currentSong.title,
-                  style: TextStyle(
-                    color: colorScheme.onSurface,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  albumText,
-                  style: TextStyle(
-                    color: colorScheme.onSurface.withOpacity(0.6),
-                    fontSize: 12,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          IconButton(
-            onPressed: () {},
-            icon: const Icon(Icons.share_rounded, size: 22),
-            color: colorScheme.onSurface,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDisc(double discSize, ColorScheme colorScheme) {
-    return AnimatedBuilder(
-      animation: _discController,
-      builder: (context, child) =>
-          Transform.rotate(angle: _discController.value * 2 * pi, child: child),
-      child: _buildAlbumArtwork(discSize, colorScheme),
     );
   }
 
@@ -728,6 +807,13 @@ class _PlayerPageState extends State<PlayerPage>
     ColorScheme colorScheme, {
     double? borderRadius,
   }) {
+    final fallback = borderRadius == null
+        ? _buildDefaultDisc(discSize, colorScheme)
+        : _buildDefaultAlbumArtwork(
+            discSize,
+            colorScheme,
+            borderRadius: borderRadius,
+          );
     Widget discContent;
     if (_currentSong.coverPath.isNotEmpty) {
       discContent = _clipArtwork(
@@ -738,8 +824,7 @@ class _PlayerPageState extends State<PlayerPage>
           cacheWidth: 700,
           cacheHeight: 700,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
-              _buildDefaultDisc(discSize, colorScheme),
+          errorBuilder: (_, __, ___) => fallback,
         ),
         borderRadius: borderRadius,
       );
@@ -752,13 +837,12 @@ class _PlayerPageState extends State<PlayerPage>
           cacheWidth: 700,
           cacheHeight: 700,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
-              _buildDefaultDisc(discSize, colorScheme),
+          errorBuilder: (_, __, ___) => fallback,
         ),
         borderRadius: borderRadius,
       );
     } else {
-      discContent = _buildDefaultDisc(discSize, colorScheme);
+      discContent = fallback;
     }
 
     if (borderRadius == null) return discContent;
@@ -777,6 +861,36 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
+  Widget _buildDefaultAlbumArtwork(
+    double size,
+    ColorScheme colorScheme, {
+    required double borderRadius,
+  }) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(borderRadius),
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            colorScheme.onSurface.withValues(alpha: 0.2),
+            colorScheme.surface.withValues(alpha: 0.72),
+          ],
+        ),
+        border: Border.all(
+          color: colorScheme.onSurface.withValues(alpha: 0.12),
+        ),
+      ),
+      child: Icon(
+        Icons.music_note_rounded,
+        size: size * 0.26,
+        color: colorScheme.onSurface.withValues(alpha: 0.72),
+      ),
+    );
+  }
+
   Widget _clipArtwork({required Widget child, double? borderRadius}) {
     if (borderRadius == null) return ClipOval(child: child);
     return ClipRRect(
@@ -791,14 +905,14 @@ class _PlayerPageState extends State<PlayerPage>
       height: discSize,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: colorScheme.primary.withOpacity(0.1),
+        color: colorScheme.primary.withValues(alpha: 0.1),
         border: Border.all(
-          color: colorScheme.outline.withOpacity(0.2),
+          color: colorScheme.outline.withValues(alpha: 0.2),
           width: 8,
         ),
         boxShadow: [
           BoxShadow(
-            color: colorScheme.shadow.withOpacity(0.2),
+            color: colorScheme.shadow.withValues(alpha: 0.2),
             blurRadius: 30,
             offset: const Offset(0, 10),
           ),
@@ -814,14 +928,14 @@ class _PlayerPageState extends State<PlayerPage>
               shape: BoxShape.circle,
               color: colorScheme.surface,
               border: Border.all(
-                color: colorScheme.outline.withOpacity(0.15),
+                color: colorScheme.outline.withValues(alpha: 0.15),
                 width: 2,
               ),
             ),
             child: Icon(
               Icons.music_note_rounded,
               size: discSize * 0.18,
-              color: colorScheme.primary.withOpacity(0.6),
+              color: colorScheme.primary.withValues(alpha: 0.6),
             ),
           ),
           Container(
@@ -829,7 +943,7 @@ class _PlayerPageState extends State<PlayerPage>
             height: 16,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
-              color: colorScheme.onSurface.withOpacity(0.3),
+              color: colorScheme.onSurface.withValues(alpha: 0.3),
             ),
           ),
         ],
@@ -842,7 +956,14 @@ class _PlayerPageState extends State<PlayerPage>
     bool largeText = false,
     double horizontalPadding = 32,
     TextAlign textAlign = TextAlign.center,
+    double? activeFontSize,
+    double? inactiveFontSize,
+    double? lyricLineHeight,
   }) {
+    final resolvedActiveFontSize = activeFontSize ?? (largeText ? 40 : 18);
+    final resolvedInactiveFontSize = inactiveFontSize ?? (largeText ? 30 : 15);
+    final resolvedLineHeight = lyricLineHeight ?? (largeText ? 1.28 : 1.7);
+    final usesLargeTypography = resolvedActiveFontSize >= 28;
     final lyrics = musicService.getLyricLines(
       _currentSong.title,
       _currentSong.artist,
@@ -856,7 +977,7 @@ class _PlayerPageState extends State<PlayerPage>
           lyrics.isEmpty ? '暂无歌词' : lyrics.first.text,
           textAlign: textAlign,
           style: TextStyle(
-            fontSize: largeText ? 26 : 18,
+            fontSize: resolvedInactiveFontSize,
             color: colorScheme.onSurface.withValues(alpha: 0.5),
           ),
         ),
@@ -881,7 +1002,11 @@ class _PlayerPageState extends State<PlayerPage>
       child: ListView.builder(
         controller: _lyricsScrollController,
         padding: EdgeInsets.symmetric(
-          vertical: max(_lyricsViewportHeight / 2 - (largeText ? 64 : 40), 40),
+          vertical: max(
+            _lyricsViewportHeight / 2 -
+                (usesLargeTypography ? resolvedActiveFontSize * 1.6 : 40),
+            32,
+          ),
           horizontal: horizontalPadding,
         ),
         itemCount: lyrics.length,
@@ -891,21 +1016,23 @@ class _PlayerPageState extends State<PlayerPage>
             key: _lyricKey(index),
             onTap: () => _onLyricTap(index),
             child: Padding(
-              padding: EdgeInsets.symmetric(vertical: largeText ? 10 : 8),
+              padding: EdgeInsets.symmetric(
+                vertical: usesLargeTypography ? 10 : 8,
+              ),
               child: AnimatedDefaultTextStyle(
                 duration: const Duration(milliseconds: 260),
                 curve: Curves.easeOutCubic,
                 style: TextStyle(
-                  fontSize: largeText
-                      ? (isCurrent ? 40 : 30)
-                      : (isCurrent ? 18 : 15),
+                  fontSize: isCurrent
+                      ? resolvedActiveFontSize
+                      : resolvedInactiveFontSize,
                   fontWeight: isCurrent ? FontWeight.w700 : FontWeight.w600,
                   color: isCurrent
                       ? colorScheme.onSurface
                       : colorScheme.onSurface.withValues(
-                          alpha: largeText ? 0.38 : 0.35,
+                          alpha: usesLargeTypography ? 0.38 : 0.35,
                         ),
-                  height: largeText ? 1.28 : 1.7,
+                  height: resolvedLineHeight,
                 ),
                 child: _buildLyricLine(
                   lyrics[index],
@@ -978,7 +1105,12 @@ class _PlayerPageState extends State<PlayerPage>
     return 0.18 + 0.82 * Curves.easeInOutCubic.transform(progress);
   }
 
-  Widget _buildProgressBar(double progress, ColorScheme colorScheme) {
+  Widget _buildProgressBar(
+    double progress,
+    ColorScheme colorScheme, {
+    double horizontalPadding = 28,
+    bool compact = false,
+  }) {
     final duration = _currentSong.duration;
     final currentMs = _isDragging
         ? _dragValue * duration.inMilliseconds
@@ -986,31 +1118,35 @@ class _PlayerPageState extends State<PlayerPage>
     final currentDur = Duration(milliseconds: currentMs.toInt());
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 28),
+      padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
       child: Column(
         children: [
           SliderTheme(
             data: SliderTheme.of(context).copyWith(
-              trackHeight: 3,
-              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+              trackHeight: compact ? 2.5 : 3,
+              thumbShape: RoundSliderThumbShape(
+                enabledThumbRadius: compact ? 5 : 6,
+              ),
+              overlayShape: RoundSliderOverlayShape(
+                overlayRadius: compact ? 10 : 14,
+              ),
               activeTrackColor: colorScheme.primary,
-              inactiveTrackColor: colorScheme.primary.withOpacity(0.15),
+              inactiveTrackColor: colorScheme.primary.withValues(alpha: 0.18),
               thumbColor: colorScheme.primary,
-              overlayColor: colorScheme.primary.withOpacity(0.2),
+              overlayColor: colorScheme.primary.withValues(alpha: 0.2),
             ),
             child: Slider(
               value: (_isDragging ? _dragValue : progress).clamp(0.0, 1.0),
-              onChangeStart: duration == Duration.zero
+              onChangeStart: duration == Duration.zero || _isSwitchingTrack
                   ? null
                   : (v) => setState(() {
                       _isDragging = true;
                       _dragValue = v;
                     }),
-              onChanged: duration == Duration.zero
+              onChanged: duration == Duration.zero || _isSwitchingTrack
                   ? null
                   : (v) => setState(() => _dragValue = v),
-              onChangeEnd: duration == Duration.zero
+              onChangeEnd: duration == Duration.zero || _isSwitchingTrack
                   ? null
                   : (v) {
                       _seekTo(
@@ -1030,15 +1166,15 @@ class _PlayerPageState extends State<PlayerPage>
                 Text(
                   _formatDuration(currentDur),
                   style: TextStyle(
-                    color: colorScheme.onSurface.withOpacity(0.5),
-                    fontSize: 12,
+                    color: colorScheme.onSurface.withValues(alpha: 0.52),
+                    fontSize: compact ? 10 : 12,
                   ),
                 ),
                 Text(
                   _formatDuration(duration),
                   style: TextStyle(
-                    color: colorScheme.onSurface.withOpacity(0.5),
-                    fontSize: 12,
+                    color: colorScheme.onSurface.withValues(alpha: 0.52),
+                    fontSize: compact ? 10 : 12,
                   ),
                 ),
               ],
@@ -1049,46 +1185,62 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
-  Widget _buildControls(ColorScheme colorScheme) {
+  Widget _buildControls(
+    ColorScheme colorScheme, {
+    double playButtonSize = 64,
+    double controlIconSize = 36,
+    double horizontalPadding = 24,
+  }) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 24),
+      padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
           IconButton(
-            onPressed: _previousSong,
+            onPressed: _isSwitchingTrack ? null : _previousSong,
             icon: const Icon(Icons.skip_previous_rounded),
-            iconSize: 36,
+            iconSize: controlIconSize,
             color: colorScheme.onSurface,
           ),
           Container(
-            width: 64,
-            height: 64,
+            width: playButtonSize,
+            height: playButtonSize,
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: colorScheme.primary,
               boxShadow: [
                 BoxShadow(
-                  color: colorScheme.primary.withOpacity(0.3),
+                  color: colorScheme.primary.withValues(alpha: 0.28),
                   blurRadius: 16,
                   offset: const Offset(0, 4),
                 ),
               ],
             ),
             child: IconButton(
-              onPressed: _togglePlayPause,
-              icon: Icon(
-                _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-              ),
+              onPressed: _isSwitchingTrack ? null : _togglePlayPause,
+              icon: _isSwitchingTrack
+                  ? SizedBox(
+                      width: controlIconSize * 0.62,
+                      height: controlIconSize * 0.62,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.5,
+                        color: colorScheme.onPrimary,
+                      ),
+                    )
+                  : Icon(
+                      _isPlaying
+                          ? Icons.pause_rounded
+                          : Icons.play_arrow_rounded,
+                    ),
               color: colorScheme.onPrimary,
-              iconSize: 36,
+              iconSize: controlIconSize,
               padding: EdgeInsets.zero,
             ),
           ),
           IconButton(
-            onPressed: _nextSong,
+            onPressed: _isSwitchingTrack ? null : _nextSong,
             icon: const Icon(Icons.skip_next_rounded),
-            iconSize: 36,
+            iconSize: controlIconSize,
             color: colorScheme.onSurface,
           ),
         ],
@@ -1096,19 +1248,32 @@ class _PlayerPageState extends State<PlayerPage>
     );
   }
 
-  Widget _buildBottomActions(ColorScheme colorScheme) {
+  Widget _buildAppleActionBar(
+    ColorScheme colorScheme, {
+    required bool showLyricsButton,
+  }) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 40),
+      padding: const EdgeInsets.symmetric(horizontal: 28),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
+          if (showLyricsButton)
+            IconButton(
+              onPressed: _toggleLyrics,
+              icon: const Icon(Icons.lyrics_rounded),
+              color: _showLyrics
+                  ? colorScheme.primary
+                  : colorScheme.onSurface.withValues(alpha: 0.55),
+              iconSize: 23,
+              tooltip: _showLyrics ? '显示专辑封面' : '显示歌词',
+            ),
           Tooltip(
             message: _playModeLabel(),
             child: IconButton(
               onPressed: _cyclePlayMode,
               icon: Icon(_playModeIcon()),
               color: _playMode == PlayMode.sequential
-                  ? colorScheme.onSurface.withOpacity(0.5)
+                  ? colorScheme.onSurface.withValues(alpha: 0.55)
                   : colorScheme.primary,
               iconSize: 22,
             ),
@@ -1117,15 +1282,16 @@ class _PlayerPageState extends State<PlayerPage>
             IconButton(
               onPressed: _downloadCurrentSong,
               icon: const Icon(Icons.download_rounded),
-              color: colorScheme.onSurface.withOpacity(0.5),
+              color: colorScheme.onSurface.withValues(alpha: 0.55),
               iconSize: 22,
               tooltip: '下载到本地',
             ),
           IconButton(
             onPressed: _showPlaylistSheet,
             icon: const Icon(Icons.playlist_play_rounded),
-            color: colorScheme.onSurface.withOpacity(0.5),
+            color: colorScheme.onSurface.withValues(alpha: 0.55),
             iconSize: 24,
+            tooltip: '播放列表',
           ),
         ],
       ),
